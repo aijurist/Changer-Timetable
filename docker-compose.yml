@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: changer-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: changer
+      POSTGRES_PASSWORD: changer
+      POSTGRES_DB: changer
+    ports:
+      - "5432:5432"
+    volumes:
+      - changer-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U changer -d changer"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  changer-postgres-data:
