@@ -12,6 +12,8 @@ services:
         value: production
       - key: DATABASE_URL
         sync: false
+      - key: DATABASE_SSL
+        value: relaxed
       - key: THEORY_SCHEDULE_JSON
         value: data/import/theory_schedule.json
       - key: LAB_SCHEDULE_JSON

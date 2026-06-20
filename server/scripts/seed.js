@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 import { parse as parseCsv } from 'csv-parse/sync';
 import yaml from 'js-yaml';
 import { config } from '../config.js';
@@ -19,7 +20,7 @@ const BYPASS_ROOMS = new Set([
   'ANEW104'
 ]);
 
-async function main() {
+export async function seedDatabase() {
   const [scheduler, roomRows, theoryRows, labRows] = await Promise.all([
     readYaml(config.importPaths.schedulerYaml),
     readCsv(config.importPaths.roomsCsv),
@@ -491,9 +492,11 @@ function toNullableNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-main()
-  .catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(closePool);
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  seedDatabase()
+    .catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    })
+    .finally(closePool);
+}

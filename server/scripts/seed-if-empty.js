@@ -1,10 +1,10 @@
 import { pool, closePool } from '../db.js';
+import { seedDatabase } from './seed.js';
 
 async function main() {
   const table = await pool.query("SELECT to_regclass('public.sessions') AS table_name");
   if (!table.rows[0].table_name) {
-    await closePool();
-    await import('./seed.js');
+    await seedDatabase();
     return;
   }
 
@@ -14,8 +14,7 @@ async function main() {
     return;
   }
 
-  await closePool();
-  await import('./seed.js');
+  await seedDatabase();
 }
 
 main()
@@ -23,10 +22,4 @@ main()
     console.error(error);
     process.exitCode = 1;
   })
-  .finally(async () => {
-    try {
-      await closePool();
-    } catch {
-      // The full seed script owns pool shutdown when it is imported above.
-    }
-  });
+  .finally(closePool);

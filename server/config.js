@@ -16,6 +16,7 @@ export const config = {
   port: Number(process.env.PORT || 8080),
   nodeEnv: process.env.NODE_ENV || 'development',
   databaseUrl: process.env.DATABASE_URL || 'postgres://changer:changer@localhost:5432/changer',
+  databaseSsl: resolveDatabaseSsl(),
   clientOrigin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
   clientDist: path.join(rootDir, 'client', 'dist'),
   importPaths: {
@@ -25,3 +26,11 @@ export const config = {
     schedulerYaml: resolveFromRoot(process.env.SCHEDULER_YAML, 'data/import/scheduler.yaml')
   }
 };
+
+function resolveDatabaseSsl() {
+  const mode = String(process.env.DATABASE_SSL || '').toLowerCase();
+  if (!mode) return undefined;
+  if (mode === 'false' || mode === 'off' || mode === 'disable') return false;
+  if (mode === 'relaxed' || mode === 'no-verify') return { rejectUnauthorized: false };
+  return { rejectUnauthorized: true };
+}

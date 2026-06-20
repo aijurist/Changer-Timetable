@@ -71,6 +71,7 @@ Recommended free setup:
    - Start command: `npm start`
    - Health check: `/api/health`
 4. Add the `DATABASE_URL` environment variable from Supabase.
+5. Add `DATABASE_SSL=relaxed` when using the Supabase shared pooler URL.
 
 `npm run deploy:init` runs migrations and then `db:seed:if-empty`. This seeds the imported timetable only when the `sessions` table is empty. It will not wipe staff edits on later deploys.
 
@@ -79,7 +80,10 @@ Recommended free setup:
 ```text
 NODE_ENV=production
 DATABASE_URL=postgresql://...
+DATABASE_SSL=relaxed
 ```
+
+For Supabase pooler passwords with special characters, URL-encode the password before pasting it into `DATABASE_URL`. For example, `@` becomes `%40`. Do not include `?sslmode=require`; SSL is controlled by `DATABASE_SSL`.
 
 Optional seed path overrides are already defaulted to `data/import/`:
 
