@@ -41,9 +41,55 @@ API: `http://localhost:8080`
 ```powershell
 npm install
 npm run db:migrate
-npm run db:seed
+npm run db:seed:if-empty
 npm run build
 npm start
 ```
 
 Serve the built frontend and API from the same Node process on `PORT`.
+
+## Free Hosting: Render + Supabase
+
+Recommended free setup:
+
+- Supabase: PostgreSQL database.
+- Render: Node web service that serves both the API and the built React frontend.
+
+### 1. Create the database
+
+1. Create a Supabase project.
+2. Copy the PostgreSQL connection string.
+3. Use the pooled/session connection string if Supabase offers one, and keep `sslmode=require` in the URL when provided.
+
+### 2. Deploy the web service
+
+1. Push this repository to GitHub.
+2. In Render, create a new Blueprint or Web Service from the repo.
+3. If using `render.yaml`, Render will use:
+   - Build command: `npm ci && npm run build`
+   - Pre-deploy command: `npm run deploy:init`
+   - Start command: `npm start`
+   - Health check: `/api/health`
+4. Add the `DATABASE_URL` environment variable from Supabase.
+
+`npm run deploy:init` runs migrations and then `db:seed:if-empty`. This seeds the imported timetable only when the `sessions` table is empty. It will not wipe staff edits on later deploys.
+
+### Required production environment variables
+
+```text
+NODE_ENV=production
+DATABASE_URL=postgresql://...
+```
+
+Optional seed path overrides are already defaulted to `data/import/`:
+
+```text
+THEORY_SCHEDULE_JSON=data/import/theory_schedule.json
+LAB_SCHEDULE_JSON=data/import/lab_schedule.json
+ROOMS_CSV=data/import/rooms_new.csv
+SCHEDULER_YAML=data/import/scheduler.yaml
+```
+
+### Important
+
+Do not run `npm run db:seed` against production after staff start editing. It truncates and re-imports the timetable. Use `npm run db:seed:if-empty` for hosting/deploy initialization.

@@ -5,4 +5,5 @@ combined_scheduler.py
 node_modules/
 client/dist/
 .env
+.server*.log
 npm-debug.log*

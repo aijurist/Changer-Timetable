@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: changer-timetable
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    preDeployCommand: npm run deploy:init
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: THEORY_SCHEDULE_JSON
+        value: data/import/theory_schedule.json
+      - key: LAB_SCHEDULE_JSON
+        value: data/import/lab_schedule.json
+      - key: ROOMS_CSV
+        value: data/import/rooms_new.csv
+      - key: SCHEDULER_YAML
+        value: data/import/scheduler.yaml
