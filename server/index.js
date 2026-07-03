@@ -3,7 +3,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { z } from 'zod';
 import { config } from './config.js';
-import { pool, withTransaction } from './db.js';
+import { pool, withClient, withTransaction } from './db.js';
 import {
   buildResourceKeys,
   findDepartmentPolicy,
@@ -112,45 +112,47 @@ app.get('/api/health', async (_req, res, next) => {
 
 app.get('/api/meta', async (_req, res, next) => {
   try {
-    const [days, theorySlots, labSessions, shifts, departments, stats, conflicts] = await Promise.all([
-      pool.query('SELECT day, day_order FROM working_days ORDER BY day_order'),
-      pool.query(
+    const result = await withClient(async (client) => {
+      const days = await client.query('SELECT day, day_order FROM working_days ORDER BY day_order');
+      const theorySlots = await client.query(
         `SELECT slot_key, label, slot_index, start_minute, end_minute, source
          FROM time_slots
          WHERE schedule_type = 'theory'
          ORDER BY coalesce(slot_index, 999), start_minute`
-      ),
-      pool.query(
+      );
+      const labSessions = await client.query(
         `SELECT slot_key, label, slot_index, start_minute, end_minute, source
          FROM time_slots
          WHERE schedule_type = 'lab'
          ORDER BY coalesce(slot_index, 999), start_minute`
-      ),
-      pool.query('SELECT shift_id, label, theory_slot_indexes, lab_sessions FROM shift_templates ORDER BY shift_id'),
-      pool.query(
+      );
+      const shifts = await client.query('SELECT shift_id, label, theory_slot_indexes, lab_sessions FROM shift_templates ORDER BY shift_id');
+      const departments = await client.query(
         `SELECT department, day_pattern, lunch_break_slot, lunch_slot_window, shift_id, flexible_lunch
          FROM department_policies
          ORDER BY department`
-      ),
-      pool.query(
+      );
+      const stats = await client.query(
         `SELECT
            (SELECT count(*)::int FROM sessions WHERE status = 'active') AS sessions,
            (SELECT count(*)::int FROM rooms) AS rooms,
            (SELECT count(*)::int FROM teachers) AS teachers,
            (SELECT count(DISTINCT department)::int FROM sessions WHERE department IS NOT NULL) AS departments`
-      ),
-      getConflictSummary()
-    ]);
+      );
+      const conflicts = await getConflictSummary(client);
 
-    res.json({
-      days: days.rows,
-      theorySlots: theorySlots.rows,
-      labSessions: labSessions.rows,
-      shifts: shifts.rows,
-      departmentPolicies: departments.rows,
-      stats: stats.rows[0],
-      conflicts
+      return {
+        days: days.rows,
+        theorySlots: theorySlots.rows,
+        labSessions: labSessions.rows,
+        shifts: shifts.rows,
+        departmentPolicies: departments.rows,
+        stats: stats.rows[0],
+        conflicts
+      };
     });
+
+    res.json(result);
   } catch (error) {
     next(error);
   }
@@ -1059,13 +1061,13 @@ function parseGroupIndex(groupName) {
   return match ? Number(match[1]) : null;
 }
 
-async function getConflictSummary() {
-  return getConflictCounts();
+async function getConflictSummary(client = pool) {
+  return getConflictCounts(client);
 }
 
 async function getConflicts(limit) {
-  const [teacher, room, capacity, count] = await Promise.all([
-    pool.query(
+  return withClient(async (client) => {
+    const teacher = await client.query(
       `SELECT 'teacher_conflict' AS type, s1.id AS session_a_id, s2.id AS session_b_id,
             t.name AS label, s1.day, s1.time_label AS time_a, s2.time_label AS time_b,
             s1.course_code AS course_a, s2.course_code AS course_b
@@ -1080,8 +1082,8 @@ async function getConflicts(limit) {
      ORDER BY s1.day, s1.start_minute
      LIMIT $1`,
       [limit]
-    ),
-    pool.query(
+    );
+    const room = await client.query(
       `SELECT 'room_conflict' AS type, s1.id AS session_a_id, s2.id AS session_b_id,
             r.room_number AS label, s1.day, s1.time_label AS time_a, s2.time_label AS time_b,
             s1.course_code AS course_a, s2.course_code AS course_b
@@ -1098,8 +1100,8 @@ async function getConflicts(limit) {
      ORDER BY s1.day, s1.start_minute
      LIMIT $1`,
       [limit]
-    ),
-    pool.query(
+    );
+    const capacity = await client.query(
       `SELECT 'capacity_violation' AS type, s.id AS session_a_id, NULL::bigint AS session_b_id,
             r.room_number AS label, s.day, s.time_label AS time_a, NULL::text AS time_b,
             s.course_code AS course_a, NULL::text AS course_b
@@ -1115,18 +1117,18 @@ async function getConflicts(limit) {
      ORDER BY s.day, s.start_minute
      LIMIT $1`,
       [limit]
-    ),
-    getConflictCounts()
-  ]);
+    );
+    const count = await getConflictCounts(client);
 
-  return {
-    summary: count,
-    rows: [...teacher.rows, ...room.rows, ...capacity.rows].slice(0, limit)
-  };
+    return {
+      summary: count,
+      rows: [...teacher.rows, ...room.rows, ...capacity.rows].slice(0, limit)
+    };
+  });
 }
 
-async function getConflictCounts() {
-  const count = await pool.query(
+async function getConflictCounts(client = pool) {
+  const count = await client.query(
     `SELECT
        (SELECT count(*)::int FROM sessions s1 JOIN sessions s2 ON s1.id < s2.id
         AND s1.status = 'active' AND s2.status = 'active'
