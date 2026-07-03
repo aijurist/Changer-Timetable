@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Plus,
@@ -770,6 +770,11 @@ function ActivityPanel({ activity }) {
 }
 
 function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onClose, onSave, onDelete, days }) {
+  const [teacherSearch, setTeacherSearch] = useState('');
+  const [roomSearch, setRoomSearch] = useState('');
+  const visibleTeachers = filterTeachers(teachers, teacherSearch, draft.teacherId);
+  const visibleRooms = filterRooms(rooms, roomSearch, draft.roomId);
+
   return (
     <div className="modal-backdrop">
       <section className="edit-modal">
@@ -797,22 +802,28 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
             </label>
           </div>
 
+          <label>Search Teacher
+            <SearchInput value={teacherSearch} onChange={setTeacherSearch} placeholder="Name or staff code" />
+          </label>
           <label>Staff
             <select value={draft.teacherId} onChange={(event) => onChange('teacherId', Number(event.target.value))}>
-              {teachers.map((teacher) => (
+              {visibleTeachers.map((teacher) => (
                 <option key={teacher.id} value={teacher.id}>{teacher.isAvailable ? '' : '[busy] '}{teacher.name}{teacher.staffCode ? ` (${teacher.staffCode})` : ''}</option>
               ))}
             </select>
           </label>
 
+          <label>Search Room
+            <SearchInput value={roomSearch} onChange={setRoomSearch} placeholder="Room or block" />
+          </label>
           <label>Room
             <select value={draft.roomId} onChange={(event) => {
               const roomId = Number(event.target.value);
               const room = rooms.find((item) => item.id === roomId);
               onChange('roomId', roomId);
-              if (room) onChange('capacity', room.maxCapacity || room.minCapacity);
+                if (room) onChange('capacity', room.maxCapacity || room.minCapacity);
             }}>
-              {rooms.map((room) => (
+              {visibleRooms.map((room) => (
                 <option key={room.id} value={room.id}>{room.isAvailable ? '' : '[booked] '}{room.roomNumber} - {room.block || '-'} - cap {room.maxCapacity || room.minCapacity || '-'}</option>
               ))}
             </select>
@@ -863,6 +874,12 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
 }
 
 function AddSessionModal({ draft, slots, rooms, teachers, days, departments, semesters, courses, saving, onChange, onClose, onSave }) {
+  const [courseSearch, setCourseSearch] = useState('');
+  const [teacherSearch, setTeacherSearch] = useState('');
+  const [roomSearch, setRoomSearch] = useState('');
+  const visibleCourses = filterCourses(courses, courseSearch, draft.courseKey);
+  const visibleTeachers = filterTeachers(teachers, teacherSearch, draft.teacherId);
+  const visibleRooms = filterRooms(rooms, roomSearch, draft.roomId);
   const canSave = draft.courseCode.trim() &&
     draft.courseName.trim() &&
     draft.department.trim() &&
@@ -912,10 +929,13 @@ function AddSessionModal({ draft, slots, rooms, teachers, days, departments, sem
             </label>
           </div>
 
+          <label>Search Course
+            <SearchInput value={courseSearch} onChange={setCourseSearch} placeholder="Subject code or name" />
+          </label>
           <label>Course
             <select value={draft.courseKey} onChange={(event) => onChange('courseKey', event.target.value)} disabled={!draft.department || !draft.semester}>
               <option value="">Select course</option>
-              {courses.map((course) => (
+              {visibleCourses.map((course) => (
                 <option key={course.key} value={course.key}>{course.courseCode} - {course.courseName}</option>
               ))}
             </select>
@@ -935,19 +955,25 @@ function AddSessionModal({ draft, slots, rooms, teachers, days, departments, sem
             <label>Course Name<input value={draft.courseName} onChange={(event) => onChange('courseName', event.target.value)} placeholder="Auto-filled from course" /></label>
           </div>
 
+          <label>Search Teacher
+            <SearchInput value={teacherSearch} onChange={setTeacherSearch} placeholder="Name or staff code" />
+          </label>
           <label>Teacher
             <select value={draft.teacherId} onChange={(event) => onChange('teacherId', Number(event.target.value))}>
               <option value="">Select teacher</option>
-              {teachers.map((teacher) => (
+              {visibleTeachers.map((teacher) => (
                 <option key={teacher.id} value={teacher.id}>{teacher.isAvailable ? '' : '[busy] '}{teacher.name}{teacher.staffCode ? ` (${teacher.staffCode})` : ''}</option>
               ))}
             </select>
           </label>
 
+          <label>Search Room
+            <SearchInput value={roomSearch} onChange={setRoomSearch} placeholder="Room or block" />
+          </label>
           <label>Room
             <select value={draft.roomId} onChange={(event) => onChange('roomId', Number(event.target.value))}>
               <option value="">Select room</option>
-              {rooms.map((room) => (
+              {visibleRooms.map((room) => (
                 <option key={room.id} value={room.id}>{room.isAvailable ? '' : '[booked] '}{room.roomNumber} - {room.block || '-'} - cap {room.maxCapacity || room.minCapacity || '-'}</option>
               ))}
             </select>
@@ -1183,6 +1209,33 @@ function pickTeacherForCourse(teachers, rows, draft) {
   const preferred = teachers.find((teacher) => teacherIds.has(teacher.id) && teacher.isAvailable)
     || teachers.find((teacher) => teacherIds.has(teacher.id));
   return preferred?.id || null;
+}
+
+function filterCourses(courses, search, selectedKey) {
+  const needle = search.trim().toLowerCase();
+  return courses.filter((course) => {
+    if (course.key === selectedKey) return true;
+    if (!needle) return true;
+    return `${course.courseCode || ''} ${course.courseName || ''}`.toLowerCase().includes(needle);
+  });
+}
+
+function filterTeachers(teachers, search, selectedId) {
+  const needle = search.trim().toLowerCase();
+  return teachers.filter((teacher) => {
+    if (String(teacher.id) === String(selectedId)) return true;
+    if (!needle) return true;
+    return `${teacher.name || ''} ${teacher.staffCode || ''}`.toLowerCase().includes(needle);
+  });
+}
+
+function filterRooms(rooms, search, selectedId) {
+  const needle = search.trim().toLowerCase();
+  return rooms.filter((room) => {
+    if (String(room.id) === String(selectedId)) return true;
+    if (!needle) return true;
+    return `${room.roomNumber || ''} ${room.block || ''} ${room.description || ''} ${room.roomType || ''}`.toLowerCase().includes(needle);
+  });
 }
 
 function summarizeDayPatterns(rows) {
