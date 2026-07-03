@@ -299,6 +299,45 @@ app.get('/api/conflicts', async (req, res, next) => {
   }
 });
 
+app.get('/api/activity', async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 100);
+    const result = await pool.query(
+      `SELECT
+         er.id,
+         er.session_id,
+         er.requested_by,
+         er.status,
+         er.payload,
+         er.result,
+         er.created_at,
+         er.completed_at,
+         s.course_code,
+         s.course_name,
+         s.schedule_type,
+         s.department,
+         s.semester,
+         s.group_name,
+         s.day,
+         s.time_label,
+         t.name AS teacher_name,
+         t.staff_code,
+         r.room_number
+       FROM edit_requests er
+       LEFT JOIN sessions s ON s.id = er.session_id
+       LEFT JOIN teachers t ON t.id = s.teacher_id
+       LEFT JOIN rooms r ON r.id = s.room_id
+       ORDER BY er.created_at DESC
+       LIMIT $1`,
+      [limit]
+    );
+
+    res.json(result.rows.map(mapActivityRow));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/export/:type.:format', async (req, res, next) => {
   try {
     const type = req.params.type;
@@ -853,6 +892,41 @@ function mapSessionRow(row) {
     rowVersion: row.row_version,
     updatedAt: row.updated_at,
     updatedBy: row.updated_by
+  };
+}
+
+function mapActivityRow(row) {
+  const payload = row.payload || {};
+  const result = row.result || {};
+  const action = payload.action || (payload.courseCode && payload.scheduleType ? 'create' : 'update');
+  const messages = [
+    ...(result.conflicts || []).map((item) => item.message || item.type).filter(Boolean),
+    ...(result.warnings || []).map((item) => item.message || item.type).filter(Boolean)
+  ];
+
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    action,
+    requestedBy: row.requested_by || 'staff',
+    status: row.status,
+    createdAt: row.created_at,
+    completedAt: row.completed_at,
+    message: messages[0] || null,
+    messageCount: messages.length,
+    session: {
+      courseCode: row.course_code || payload.courseCode || null,
+      courseName: row.course_name || payload.courseName || null,
+      scheduleType: row.schedule_type || payload.scheduleType || null,
+      department: row.department || payload.department || null,
+      semester: row.semester || payload.semester || null,
+      groupName: row.group_name || payload.groupName || null,
+      day: row.day || payload.day || null,
+      timeLabel: row.time_label || null,
+      teacherName: row.teacher_name || null,
+      staffCode: row.staff_code || null,
+      roomNumber: row.room_number || null
+    }
   };
 }
 

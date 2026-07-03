@@ -23,6 +23,7 @@ export const api = {
   rooms: (params) => request(`/api/rooms?${new URLSearchParams(cleanParams(params))}`),
   teachers: (params) => request(`/api/teachers?${new URLSearchParams(cleanParams(params))}`),
   conflicts: () => request('/api/conflicts?limit=100'),
+  activity: (limit = 20) => request(`/api/activity?limit=${limit}`),
   createSession: (payload) => request('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(payload)

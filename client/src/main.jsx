@@ -7,7 +7,9 @@ import {
   Clock,
   Database,
   Download,
+  History,
   RefreshCw,
+  RotateCcw,
   Save,
   Search,
   Trash2,
@@ -50,8 +52,11 @@ function App() {
   const [createRooms, setCreateRooms] = useState([]);
   const [createTeachers, setCreateTeachers] = useState([]);
   const [conflicts, setConflicts] = useState(null);
+  const [activity, setActivity] = useState([]);
+  const [lastLoadedAt, setLastLoadedAt] = useState(null);
   const [notice, setNotice] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
 
   async function loadMeta() {
@@ -79,18 +84,49 @@ function App() {
     }
   }
 
+  async function loadActivity() {
+    const result = await api.activity(12);
+    setActivity(result);
+  }
+
+  async function refreshAll(nextFilters = filters) {
+    setRefreshing(true);
+    try {
+      await Promise.all([loadMeta(), loadSessions(nextFilters), loadActivity()]);
+      setLastLoadedAt(new Date());
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   useEffect(() => {
-    Promise.all([loadMeta(), loadSessions()])
+    refreshAll()
       .catch((error) => setNotice({ type: 'error', text: error.message }))
       .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
     const handle = setTimeout(() => {
-      loadSessions(filters).catch((error) => setNotice({ type: 'error', text: error.message }));
+      loadSessions(filters)
+        .then(() => setLastLoadedAt(new Date()))
+        .catch((error) => setNotice({ type: 'error', text: error.message }));
     }, 250);
     return () => clearTimeout(handle);
   }, [filters.type, filters.day, filters.department]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      if (!document.hidden && !draft && !createDraft) {
+        refreshAll(filters).catch((error) => setNotice({ type: 'error', text: error.message }));
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
+  }, [filters.type, filters.day, filters.department, draft, createDraft]);
 
   useEffect(() => {
     if (!draft) return;
@@ -169,6 +205,7 @@ function App() {
   }, [sessions]);
 
   const groupedSessions = useMemo(() => groupSessions(displayedSessions, viewType), [displayedSessions, viewType]);
+  const hasFilters = useMemo(() => Object.values(filters).some(Boolean), [filters]);
   const slots = draft?.scheduleType === 'lab' ? meta?.labSessions || [] : meta?.theorySlots || [];
   const createCourses = useMemo(
     () => createDraft ? getCoursesForSelection(sessions, createDraft) : [],
@@ -283,6 +320,8 @@ function App() {
         text: result.warnings?.length ? `Saved with ${result.warnings.length} warning(s).` : 'Session updated successfully.'
       });
       await Promise.all([loadMeta(), loadSessions(filters)]);
+      await loadActivity();
+      setLastLoadedAt(new Date());
     } catch (error) {
       const details = error.body?.conflicts?.map((conflict) => conflict.message).join(' ');
       setNotice({ type: 'error', text: details || error.message });
@@ -304,7 +343,7 @@ function App() {
       await api.deleteSession(selected.id, { updatedBy: draft.updatedBy || 'staff' });
       closeEditor();
       setNotice({ type: 'success', text: 'Session deleted successfully.' });
-      await Promise.all([loadMeta(), loadSessions(filters)]);
+      await refreshAll(filters);
     } catch (error) {
       setNotice({ type: 'error', text: error.body?.message || error.message });
     } finally {
@@ -408,7 +447,7 @@ function App() {
         text: result.warnings?.length ? `Session added with ${result.warnings.length} warning(s).` : 'Session added successfully.'
       });
       closeCreateSession();
-      await Promise.all([loadMeta(), loadSessions(filters)]);
+      await refreshAll(filters);
       setSelected(result.session);
       setDraft(toDraft(result.session));
     } catch (error) {
@@ -440,8 +479,10 @@ function App() {
         <div className="navbar-actions">
           <a className="nav-button" href="/api/export/theory.csv" title="Export theory CSV"><Download size={17} /> Theory CSV</a>
           <a className="nav-button" href="/api/export/lab.csv" title="Export lab CSV"><Download size={17} /> Lab CSV</a>
-          <button className="nav-button" onClick={() => Promise.all([loadMeta(), loadSessions(filters)])}>
-            <RefreshCw size={17} /> Refresh
+          <a className="nav-button nav-button-compact" href="/api/export/theory.json" title="Export theory JSON">JSON</a>
+          <a className="nav-button nav-button-compact" href="/api/export/lab.json" title="Export lab JSON">JSON</a>
+          <button className="nav-button" onClick={() => refreshAll(filters)} disabled={refreshing}>
+            <RefreshCw size={17} className={refreshing ? 'spin-slow' : ''} /> Refresh
           </button>
           <button className="nav-button add-nav-button" onClick={() => openCreateSession()}>
             <Plus size={17} /> Add Session
@@ -469,7 +510,12 @@ function App() {
         <section className="filter-section">
           <div className="filter-header">
             <h2>Filters</h2>
-            <span>{displayedSessions.length} shown / {total} loaded</span>
+            <div className="filter-actions">
+              <span>{displayedSessions.length} shown / {total} loaded{lastLoadedAt ? ` - refreshed ${lastLoadedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}</span>
+              <button className="tiny-action" onClick={() => setFilters(emptyFilters)} disabled={!hasFilters}>
+                <RotateCcw size={14} /> Reset
+              </button>
+            </div>
           </div>
           <div className="filters">
             <Field label="View Type"><Select value={viewType} onChange={setViewType} options={viewOptions} /></Field>
@@ -491,6 +537,8 @@ function App() {
           <span>Room {conflicts?.summary?.room || 0}</span>
           <span>Capacity {conflicts?.summary?.capacity || 0}</span>
         </section>
+
+        <ActivityPanel activity={activity} />
 
         <section className="schedule-groups">
           {groupedSessions.length === 0 ? (
@@ -646,6 +694,35 @@ function SessionBlock({ session, onSelect }) {
       <span className="session-room">{session.roomNumber || '-'}</span>
       <small className="session-instance">{session.courseInstanceId || session.id}</small>
     </button>
+  );
+}
+
+function ActivityPanel({ activity }) {
+  if (!activity?.length) return null;
+
+  return (
+    <section className="activity-panel">
+      <header className="activity-header">
+        <h2><History size={17} /> Recent Changes</h2>
+        <span>Latest saved or rejected edits</span>
+      </header>
+      <div className="activity-list">
+        {activity.slice(0, 8).map((item) => (
+          <article className="activity-item" key={item.id}>
+            <span className={`status-badge ${item.status}`}>{item.status}</span>
+            <div className="activity-main">
+              <strong>{titleCase(item.action)} {item.session?.courseCode || 'session'}</strong>
+              <span>
+                {formatActivitySession(item.session)}
+                {item.requestedBy ? ` by ${item.requestedBy}` : ''}
+              </span>
+              {item.message && <small>{item.message}{item.messageCount > 1 ? ` (+${item.messageCount - 1} more)` : ''}</small>}
+            </div>
+            <time>{formatRelativeTime(item.createdAt)}</time>
+          </article>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -1068,6 +1145,29 @@ function getGroupClass(groupName) {
 
 function titleCase(value) {
   return String(value || '').charAt(0).toUpperCase() + String(value || '').slice(1);
+}
+
+function formatActivitySession(session = {}) {
+  const parts = [
+    session.courseName,
+    session.teacherName,
+    session.roomNumber,
+    session.day && session.timeLabel ? `${titleCase(session.day)} ${session.timeLabel}` : titleCase(session.day || ''),
+    session.groupName
+  ].filter(Boolean);
+  return parts.length ? parts.join(' - ') : 'No session details';
+}
+
+function formatRelativeTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  const diffMs = Date.now() - date.getTime();
+  const diffMinutes = Math.max(0, Math.floor(diffMs / 60000));
+  if (diffMinutes < 1) return 'now';
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  return date.toLocaleDateString();
 }
 
 function toDraft(session) {
