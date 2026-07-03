@@ -21,7 +21,7 @@ app.use((req, res, next) => {
   if (config.nodeEnv === 'development') {
     res.header('Access-Control-Allow-Origin', config.clientOrigin);
     res.header('Access-Control-Allow-Headers', 'Content-Type');
-    res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,OPTIONS');
+    res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   return next();
@@ -507,6 +507,66 @@ app.post('/api/sessions', async (req, res, next) => {
           warnings: validation.warnings,
           editRequestId: requestId
         }
+      };
+    });
+
+    res.status(result.status).json(result.body);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/sessions/:id', async (req, res, next) => {
+  try {
+    const sessionId = Number(req.params.id);
+    const updatedBy = String(req.query.updatedBy || req.body?.updatedBy || 'staff').trim().slice(0, 120);
+
+    const result = await withTransaction(async (client) => {
+      const request = await client.query(
+        `INSERT INTO edit_requests (session_id, requested_by, payload)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [sessionId, updatedBy || null, { action: 'delete', updatedBy }]
+      );
+      const requestId = request.rows[0].id;
+
+      const currentResult = await client.query('SELECT * FROM sessions WHERE id = $1 FOR UPDATE', [sessionId]);
+      if (!currentResult.rowCount) throw new HttpError(404, 'Session not found');
+      const current = currentResult.rows[0];
+      if (current.status !== 'active') {
+        await rejectEdit(client, requestId, 'already_deleted', { sessionId });
+        return {
+          status: 409,
+          body: { success: false, message: 'Session is already deleted.' }
+        };
+      }
+
+      await lockResources(client, buildResourceKeys(current, current));
+      const beforePayload = await serializeSession(client, sessionId);
+      await client.query(
+        `UPDATE sessions
+         SET status = 'archived',
+             row_version = row_version + 1,
+             updated_by = $2
+         WHERE id = $1`,
+        [sessionId, updatedBy || null]
+      );
+
+      await client.query(
+        `INSERT INTO session_audit_log (session_id, edit_request_id, changed_by, before_payload, after_payload)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [sessionId, requestId, updatedBy || null, beforePayload, { ...beforePayload, status: 'archived' }]
+      );
+      await client.query(
+        `UPDATE edit_requests
+         SET status = 'applied', result = $2, completed_at = now()
+         WHERE id = $1`,
+        [requestId, { action: 'delete' }]
+      );
+
+      return {
+        status: 200,
+        body: { success: true, deletedId: String(sessionId), editRequestId: requestId }
       };
     });
 

@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Save,
   Search,
+  Trash2,
   X
 } from 'lucide-react';
 import { api } from './api.js';
@@ -290,6 +291,27 @@ function App() {
     }
   }
 
+  async function deleteSelectedSession() {
+    if (!selected || !draft) return;
+    const confirmed = window.confirm(
+      `Delete this session instance?\n\n${selected.courseCode} - ${selected.courseName}\nStaff: ${selected.teacherName || '-'}\nRoom: ${selected.roomNumber || '-'}\nTime: ${titleCase(selected.day)} ${selected.timeLabel}`
+    );
+    if (!confirmed) return;
+
+    setSaving(true);
+    setNotice(null);
+    try {
+      await api.deleteSession(selected.id, { updatedBy: draft.updatedBy || 'staff' });
+      closeEditor();
+      setNotice({ type: 'success', text: 'Session deleted successfully.' });
+      await Promise.all([loadMeta(), loadSessions(filters)]);
+    } catch (error) {
+      setNotice({ type: 'error', text: error.body?.message || error.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function updateCreateDraft(key, value) {
     setCreateDraft((current) => {
       const next = { ...current, [key]: value };
@@ -416,8 +438,8 @@ function App() {
         </div>
         <div className="navbar-title">Combined Schedule View</div>
         <div className="navbar-actions">
-          <a className="nav-button" href="/api/export/theory.json" title="Export theory JSON"><Download size={17} /> Theory</a>
-          <a className="nav-button" href="/api/export/lab.json" title="Export lab JSON"><Download size={17} /> Lab</a>
+          <a className="nav-button" href="/api/export/theory.csv" title="Export theory CSV"><Download size={17} /> Theory CSV</a>
+          <a className="nav-button" href="/api/export/lab.csv" title="Export lab CSV"><Download size={17} /> Lab CSV</a>
           <button className="nav-button" onClick={() => Promise.all([loadMeta(), loadSessions(filters)])}>
             <RefreshCw size={17} /> Refresh
           </button>
@@ -497,6 +519,7 @@ function App() {
           onChange={updateDraft}
           onClose={closeEditor}
           onSave={saveDraft}
+          onDelete={deleteSelectedSession}
           days={meta?.days || []}
         />
       )}
@@ -626,7 +649,7 @@ function SessionBlock({ session, onSelect }) {
   );
 }
 
-function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onClose, onSave, days }) {
+function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onClose, onSave, onDelete, days }) {
   return (
     <div className="modal-backdrop">
       <section className="edit-modal">
@@ -705,6 +728,8 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
         </div>
 
         <footer className="modal-actions">
+          <button className="danger-action" onClick={onDelete} disabled={saving}><Trash2 size={17} /> Delete</button>
+          <span className="modal-spacer" />
           <button className="secondary-action" onClick={onClose}>Cancel</button>
           <button className="primary-action" onClick={onSave} disabled={saving}>{saving ? <Clock size={17} /> : <Save size={17} />} {saving ? 'Saving' : 'Save Changes'}</button>
         </footer>

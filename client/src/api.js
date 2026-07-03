@@ -30,6 +30,10 @@ export const api = {
   updateSession: (id, payload) => request(`/api/sessions/${id}`, {
     method: 'PATCH',
     body: JSON.stringify(payload)
+  }),
+  deleteSession: (id, payload = {}) => request(`/api/sessions/${id}`, {
+    method: 'DELETE',
+    body: JSON.stringify(payload)
   })
 };
 
