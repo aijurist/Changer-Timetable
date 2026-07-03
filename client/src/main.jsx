@@ -271,6 +271,7 @@ function App() {
       dayPattern: seedSession?.dayPattern || filters.dayPattern || getDayPatternLabel(days),
       studentCount: seedSession?.studentCount || 70,
       totalStudents: seedSession?.totalStudents || 70,
+      allowCapacityOverride: false,
       isBatched: false,
       batchInfo: '',
       numBatches: '',
@@ -301,6 +302,7 @@ function App() {
         roomId: draft.roomId,
         studentCount: draft.studentCount,
         totalStudents: draft.totalStudents,
+        allowCapacityOverride: draft.allowCapacityOverride,
         isBatched: draft.isBatched,
         batchInfo: draft.batchInfo,
         numBatches: draft.numBatches,
@@ -432,6 +434,7 @@ function App() {
         dayPattern: createDraft.dayPattern || null,
         studentCount: toOptionalNumber(createDraft.studentCount),
         totalStudents: toOptionalNumber(createDraft.totalStudents),
+        allowCapacityOverride: Boolean(createDraft.allowCapacityOverride),
         isBatched: Boolean(createDraft.isBatched),
         batchInfo: createDraft.batchInfo || null,
         numBatches: toOptionalNumber(createDraft.numBatches),
@@ -814,6 +817,10 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
             <label>Students<input type="number" min="0" value={draft.studentCount ?? ''} onChange={(event) => onChange('studentCount', toOptionalNumber(event.target.value))} /></label>
             <label>Total Students<input type="number" min="0" value={draft.totalStudents ?? ''} onChange={(event) => onChange('totalStudents', toOptionalNumber(event.target.value))} /></label>
           </div>
+          <label className="check-row">
+            <input type="checkbox" checked={Boolean(draft.allowCapacityOverride)} onChange={(event) => onChange('allowCapacityOverride', event.target.checked)} />
+            <span>Bypass effective student count capacity check</span>
+          </label>
 
           {draft.scheduleType === 'lab' ? (
             <>
@@ -955,6 +962,10 @@ function AddSessionModal({ draft, slots, rooms, teachers, days, departments, sem
             <label>Students<input type="number" min="0" value={draft.studentCount} onChange={(event) => onChange('studentCount', event.target.value)} /></label>
             <label>Total Students<input type="number" min="0" value={draft.totalStudents} onChange={(event) => onChange('totalStudents', event.target.value)} /></label>
           </div>
+          <label className="check-row">
+            <input type="checkbox" checked={Boolean(draft.allowCapacityOverride)} onChange={(event) => onChange('allowCapacityOverride', event.target.checked)} />
+            <span>Bypass effective student count capacity check</span>
+          </label>
 
           {draft.scheduleType === 'lab' ? (
             <>
@@ -1223,6 +1234,7 @@ function toDraft(session) {
     capacity: session.capacity,
     studentCount: session.studentCount,
     totalStudents: session.totalStudents,
+    allowCapacityOverride: session.allowCapacityOverride,
     isBatched: session.isBatched,
     batchInfo: session.batchInfo,
     numBatches: session.numBatches,

@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   capacity_info TEXT,
   raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
   allow_room_conflicts BOOLEAN NOT NULL DEFAULT false,
+  allow_capacity_override BOOLEAN NOT NULL DEFAULT false,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
   row_version INTEGER NOT NULL DEFAULT 1,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

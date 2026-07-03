@@ -56,7 +56,7 @@ export async function findSessionConflicts(client, nextSession, excludeSessionId
   }
 
   const effectiveCount = effectiveStudentCount(nextSession);
-  if (effectiveCount > 0 && nextSession.capacity && effectiveCount > Number(nextSession.capacity)) {
+  if (!nextSession.allow_capacity_override && effectiveCount > 0 && nextSession.capacity && effectiveCount > Number(nextSession.capacity)) {
     conflicts.push({
       type: 'capacity_violation',
       message: `Effective student count ${effectiveCount} exceeds room capacity ${nextSession.capacity}.`

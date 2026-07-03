@@ -52,6 +52,7 @@ const sessionPatchSchema = z.object({
   tutorialHours: z.union([z.coerce.number().nonnegative(), z.null()]).optional(),
   coScheduleInfo: z.union([z.string().trim().max(300), z.null()]).optional(),
   courseCodeDisplay: z.union([z.string().trim().max(120), z.null()]).optional(),
+  allowCapacityOverride: z.boolean().optional(),
   rowVersion: z.coerce.number().int().positive().optional(),
   updatedBy: z.string().trim().max(120).optional()
 });
@@ -82,6 +83,7 @@ const sessionCreateSchema = z.object({
   lectureHours: z.union([z.coerce.number().nonnegative(), z.null()]).optional(),
   tutorialHours: z.union([z.coerce.number().nonnegative(), z.null()]).optional(),
   coScheduleInfo: z.union([z.string().trim().max(300), z.null()]).optional(),
+  allowCapacityOverride: z.boolean().optional(),
   updatedBy: z.string().trim().max(120).optional()
 });
 
@@ -456,6 +458,7 @@ app.post('/api/sessions', async (req, res, next) => {
         is_co_scheduled: false,
         co_schedule_info: payload.coScheduleInfo ?? null,
         allow_room_conflicts: room.rows[0].allow_conflicts,
+        allow_capacity_override: payload.allowCapacityOverride ?? false,
         raw_payload: { manual: true, createdFrom: 'changer-ui', requestId }
       };
 
@@ -486,14 +489,14 @@ app.post('/api/sessions', async (req, res, next) => {
           slot_index, session_name, time_label, start_minute, end_minute, student_count,
           total_students, capacity, is_batched, batch_info, num_batches, batch_number, batch_label,
           group_name, group_index, department, semester, day_pattern, is_co_scheduled,
-          co_schedule_info, raw_payload, allow_room_conflicts, updated_by
+          co_schedule_info, raw_payload, allow_room_conflicts, allow_capacity_override, updated_by
         )
         VALUES (
           $1, $2, $3,
           (SELECT coalesce(max(source_index), 0) + 1 FROM sessions WHERE source_file = 'manual'),
           $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
           $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29,
-          $30, $31, $32, $33, $34, $35, $36, $37, $38, $39
+          $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40
         )
         RETURNING id`,
         [
@@ -535,6 +538,7 @@ app.post('/api/sessions', async (req, res, next) => {
           nextSession.co_schedule_info,
           nextSession.raw_payload,
           nextSession.allow_room_conflicts,
+          nextSession.allow_capacity_override,
           payload.updatedBy || null
         ]
       );
@@ -679,6 +683,7 @@ app.patch('/api/sessions/:id', async (req, res, next) => {
         room_id: roomId,
         capacity: getRoomCapacity(room.rows[0].room_number, room.rows[0]) ?? current.capacity,
         allow_room_conflicts: room.rows[0].allow_conflicts,
+        allow_capacity_override: payload.allowCapacityOverride !== undefined ? payload.allowCapacityOverride : current.allow_capacity_override,
         student_count: payload.studentCount !== undefined ? payload.studentCount : current.student_count,
         total_students: payload.totalStudents !== undefined ? payload.totalStudents : current.total_students,
         is_batched: payload.isBatched !== undefined ? payload.isBatched : current.is_batched,
@@ -732,20 +737,21 @@ app.patch('/api/sessions/:id', async (req, res, next) => {
              room_id = $10,
              capacity = $11,
              allow_room_conflicts = $12,
-             student_count = $13,
-             total_students = $14,
-             is_batched = $15,
-             batch_info = $16,
-             num_batches = $17,
-             batch_number = $18,
-             batch_label = $19,
-             practical_hours = $20,
-             lecture_hours = $21,
-             tutorial_hours = $22,
-             co_schedule_info = $23,
-             course_code_display = $24,
+             allow_capacity_override = $13,
+             student_count = $14,
+             total_students = $15,
+             is_batched = $16,
+             batch_info = $17,
+             num_batches = $18,
+             batch_number = $19,
+             batch_label = $20,
+             practical_hours = $21,
+             lecture_hours = $22,
+             tutorial_hours = $23,
+             co_schedule_info = $24,
+             course_code_display = $25,
              row_version = row_version + 1,
-             updated_by = $25
+             updated_by = $26
          WHERE id = $1
          RETURNING *`,
         [
@@ -761,6 +767,7 @@ app.patch('/api/sessions/:id', async (req, res, next) => {
           nextSession.room_id,
           nextSession.capacity,
           nextSession.allow_room_conflicts,
+          nextSession.allow_capacity_override,
           nextSession.student_count,
           nextSession.total_students,
           nextSession.is_batched,
@@ -880,6 +887,7 @@ function mapSessionRow(row) {
     roomType: row.room_type,
     roomIsLab: row.room_is_lab,
     roomAllowConflicts: row.room_allow_conflicts,
+    allowCapacityOverride: row.allow_capacity_override,
     day: row.day,
     slotKey: row.slot_key,
     slotIndex: row.slot_index,
@@ -1016,6 +1024,7 @@ async function getConflicts(limit) {
      JOIN rooms r ON r.id = s.room_id
      WHERE s.status = 'active'
        AND s.capacity IS NOT NULL
+       AND s.allow_capacity_override = false
        AND CASE
          WHEN s.is_batched THEN ceil(coalesce(s.student_count, 0)::numeric / greatest(coalesce(s.num_batches, 2), 1))
          ELSE coalesce(s.student_count, 0)
@@ -1037,8 +1046,8 @@ async function getConflicts(limit) {
         AND s1.allow_room_conflicts = false AND s2.allow_room_conflicts = false
         AND int4range(s1.start_minute, s1.end_minute, '[)') && int4range(s2.start_minute, s2.end_minute, '[)')) AS room,
        (SELECT count(*)::int FROM sessions s
-        WHERE s.status = 'active' AND s.capacity IS NOT NULL
-        AND CASE
+        WHERE s.status = 'active' AND s.capacity IS NOT NULL AND s.allow_capacity_override = false
+          AND CASE
           WHEN s.is_batched THEN ceil(coalesce(s.student_count, 0)::numeric / greatest(coalesce(s.num_batches, 2), 1))
           ELSE coalesce(s.student_count, 0)
         END > s.capacity) AS capacity`
