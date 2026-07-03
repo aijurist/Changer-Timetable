@@ -20,6 +20,7 @@ async function request(path, options = {}) {
 export const api = {
   meta: () => request('/api/meta'),
   sessions: (params) => request(`/api/sessions?${new URLSearchParams(cleanParams(params))}`),
+  session: (id) => request(`/api/sessions/${id}`),
   rooms: (params) => request(`/api/rooms?${new URLSearchParams(cleanParams(params))}`),
   teachers: (params) => request(`/api/teachers?${new URLSearchParams(cleanParams(params))}`),
   conflicts: () => request('/api/conflicts?limit=100'),

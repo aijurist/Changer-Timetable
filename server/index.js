@@ -188,8 +188,9 @@ app.get('/api/sessions', async (req, res, next) => {
     }
 
     values.push(limit, offset);
+    const compact = req.query.compact === '1';
     const result = await pool.query(
-      `${sessionSelectSql()}
+      `${compact ? sessionListSelectSql() : sessionSelectSql()}
        WHERE ${where.join(' AND ')}
        ORDER BY coalesce(wd.day_order, 99), s.start_minute, s.department, s.course_code
        LIMIT $${values.length - 1} OFFSET $${values.length}`,
@@ -197,16 +198,20 @@ app.get('/api/sessions', async (req, res, next) => {
     );
 
     const countValues = values.slice(0, -2);
+    const countFrom = req.query.q
+      ? `FROM sessions s
+         JOIN teachers t ON t.id = s.teacher_id
+         JOIN rooms r ON r.id = s.room_id`
+      : 'FROM sessions s';
     const countResult = await pool.query(
       `SELECT count(*)::int AS total
-       FROM sessions s
-       JOIN teachers t ON t.id = s.teacher_id
-       JOIN rooms r ON r.id = s.room_id
+       ${countFrom}
        WHERE ${where.join(' AND ')}`,
       countValues
     );
 
-    res.json({ rows: result.rows.map(mapSessionRow), total: countResult.rows[0].total, limit, offset });
+    const mapper = compact ? mapSessionListRow : mapSessionRow;
+    res.json({ rows: result.rows.map(mapper), total: countResult.rows[0].total, limit, offset });
   } catch (error) {
     next(error);
   }
@@ -864,6 +869,48 @@ function sessionSelectSql() {
     LEFT JOIN working_days wd ON wd.day = s.day`;
 }
 
+function sessionListSelectSql() {
+  return `SELECT
+      s.id,
+      s.schedule_type,
+      s.course_instance_id,
+      s.course_code,
+      s.course_name,
+      s.session_type,
+      s.practical_hours,
+      s.lecture_hours,
+      s.tutorial_hours,
+      s.teacher_id,
+      t.name AS teacher_name,
+      t.staff_code AS teacher_staff_code,
+      s.room_id,
+      r.room_number,
+      r.block AS room_block,
+      s.day,
+      s.slot_key,
+      s.slot_index,
+      s.time_label,
+      s.start_minute,
+      s.end_minute,
+      s.student_count,
+      s.total_students,
+      s.capacity,
+      s.is_batched,
+      s.num_batches,
+      s.group_name,
+      s.group_index,
+      s.department,
+      s.semester,
+      s.day_pattern,
+      s.allow_capacity_override,
+      s.row_version,
+      wd.day_order
+    FROM sessions s
+    JOIN teachers t ON t.id = s.teacher_id
+    JOIN rooms r ON r.id = s.room_id
+    LEFT JOIN working_days wd ON wd.day = s.day`;
+}
+
 function mapSessionRow(row) {
   return {
     id: row.id,
@@ -915,6 +962,44 @@ function mapSessionRow(row) {
     rowVersion: row.row_version,
     updatedAt: row.updated_at,
     updatedBy: row.updated_by
+  };
+}
+
+function mapSessionListRow(row) {
+  return {
+    id: row.id,
+    scheduleType: row.schedule_type,
+    courseInstanceId: row.course_instance_id,
+    courseCode: row.course_code,
+    courseName: row.course_name,
+    sessionType: row.session_type,
+    practicalHours: row.practical_hours,
+    lectureHours: row.lecture_hours,
+    tutorialHours: row.tutorial_hours,
+    teacherId: row.teacher_id,
+    teacherName: row.teacher_name,
+    staffCode: row.teacher_staff_code,
+    roomId: row.room_id,
+    roomNumber: row.room_number,
+    block: row.room_block,
+    day: row.day,
+    slotKey: row.slot_key,
+    slotIndex: row.slot_index,
+    timeLabel: row.time_label,
+    startMinute: row.start_minute,
+    endMinute: row.end_minute,
+    studentCount: row.student_count,
+    totalStudents: row.total_students,
+    capacity: row.capacity,
+    isBatched: row.is_batched,
+    numBatches: row.num_batches,
+    groupName: row.group_name,
+    groupIndex: row.group_index,
+    department: row.department,
+    semester: row.semester,
+    dayPattern: row.day_pattern,
+    allowCapacityOverride: row.allow_capacity_override,
+    rowVersion: row.row_version
   };
 }
 
@@ -975,13 +1060,13 @@ function parseGroupIndex(groupName) {
 }
 
 async function getConflictSummary() {
-  const conflicts = await getConflicts(1);
-  return conflicts.summary;
+  return getConflictCounts();
 }
 
 async function getConflicts(limit) {
-  const teacher = await pool.query(
-    `SELECT 'teacher_conflict' AS type, s1.id AS session_a_id, s2.id AS session_b_id,
+  const [teacher, room, capacity, count] = await Promise.all([
+    pool.query(
+      `SELECT 'teacher_conflict' AS type, s1.id AS session_a_id, s2.id AS session_b_id,
             t.name AS label, s1.day, s1.time_label AS time_a, s2.time_label AS time_b,
             s1.course_code AS course_a, s2.course_code AS course_b
      FROM sessions s1
@@ -994,11 +1079,10 @@ async function getConflicts(limit) {
      JOIN teachers t ON t.id = s1.teacher_id
      ORDER BY s1.day, s1.start_minute
      LIMIT $1`,
-    [limit]
-  );
-
-  const room = await pool.query(
-    `SELECT 'room_conflict' AS type, s1.id AS session_a_id, s2.id AS session_b_id,
+      [limit]
+    ),
+    pool.query(
+      `SELECT 'room_conflict' AS type, s1.id AS session_a_id, s2.id AS session_b_id,
             r.room_number AS label, s1.day, s1.time_label AS time_a, s2.time_label AS time_b,
             s1.course_code AS course_a, s2.course_code AS course_b
      FROM sessions s1
@@ -1013,11 +1097,10 @@ async function getConflicts(limit) {
      JOIN rooms r ON r.id = s1.room_id
      ORDER BY s1.day, s1.start_minute
      LIMIT $1`,
-    [limit]
-  );
-
-  const capacity = await pool.query(
-    `SELECT 'capacity_violation' AS type, s.id AS session_a_id, NULL::bigint AS session_b_id,
+      [limit]
+    ),
+    pool.query(
+      `SELECT 'capacity_violation' AS type, s.id AS session_a_id, NULL::bigint AS session_b_id,
             r.room_number AS label, s.day, s.time_label AS time_a, NULL::text AS time_b,
             s.course_code AS course_a, NULL::text AS course_b
      FROM sessions s
@@ -1031,9 +1114,18 @@ async function getConflicts(limit) {
        END > s.capacity
      ORDER BY s.day, s.start_minute
      LIMIT $1`,
-    [limit]
-  );
+      [limit]
+    ),
+    getConflictCounts()
+  ]);
 
+  return {
+    summary: count,
+    rows: [...teacher.rows, ...room.rows, ...capacity.rows].slice(0, limit)
+  };
+}
+
+async function getConflictCounts() {
   const count = await pool.query(
     `SELECT
        (SELECT count(*)::int FROM sessions s1 JOIN sessions s2 ON s1.id < s2.id
@@ -1049,18 +1141,15 @@ async function getConflicts(limit) {
         WHERE s.status = 'active' AND s.capacity IS NOT NULL AND s.allow_capacity_override = false
           AND CASE
           WHEN s.is_batched THEN ceil(coalesce(s.student_count, 0)::numeric / greatest(coalesce(s.num_batches, 2), 1))
-          ELSE coalesce(s.student_count, 0)
+        ELSE coalesce(s.student_count, 0)
         END > s.capacity) AS capacity`
   );
 
   return {
-    summary: {
-      teacher: count.rows[0].teacher,
-      room: count.rows[0].room,
-      capacity: count.rows[0].capacity,
-      total: count.rows[0].teacher + count.rows[0].room + count.rows[0].capacity
-    },
-    rows: [...teacher.rows, ...room.rows, ...capacity.rows].slice(0, limit)
+    teacher: count.rows[0].teacher,
+    room: count.rows[0].room,
+    capacity: count.rows[0].capacity,
+    total: count.rows[0].teacher + count.rows[0].room + count.rows[0].capacity
   };
 }
 

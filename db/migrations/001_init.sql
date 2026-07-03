@@ -179,6 +179,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_lookup ON sessions (schedule_type, day, 
 CREATE INDEX IF NOT EXISTS idx_sessions_room_time ON sessions (room_id, day, start_minute, end_minute) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_sessions_teacher_time ON sessions (teacher_id, day, start_minute, end_minute) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_sessions_department ON sessions (department, semester, group_name);
+CREATE INDEX IF NOT EXISTS idx_sessions_active_order ON sessions (status, day, start_minute, department, course_code);
+CREATE INDEX IF NOT EXISTS idx_sessions_active_group_time ON sessions (group_name, day, start_minute, end_minute)
+  WHERE status = 'active' AND group_name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_search ON sessions USING gin (
   to_tsvector(
     'simple',
@@ -188,6 +191,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_search ON sessions USING gin (
     coalesce(group_name, '')
   )
 );
+CREATE INDEX IF NOT EXISTS idx_edit_requests_created_at ON edit_requests (created_at DESC);
 
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$

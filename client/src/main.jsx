@@ -75,23 +75,18 @@ function App() {
   } = useChangerStore();
 
   async function loadMeta() {
-    const [metaResult, conflictResult] = await Promise.all([api.meta(), api.conflicts()]);
+    const metaResult = await api.meta();
     setMeta(metaResult);
-    setConflicts(conflictResult);
+    setConflicts({ summary: metaResult.conflicts, rows: [] });
   }
 
   async function loadSessions(nextFilters = filters) {
-    const result = await api.sessions({ limit: 5000 });
+    const result = await api.sessions({ limit: 5000, compact: 1 });
     setSessions(result.rows);
     setTotal(result.total);
     if (selected) {
       const refreshed = result.rows.find((row) => row.id === selected.id);
-      if (refreshed) {
-        setSelected(refreshed);
-        setDraft(toDraft(refreshed));
-      } else {
-        closeEditor();
-      }
+      if (!refreshed) closeEditor();
     }
   }
 
@@ -240,10 +235,17 @@ function App() {
     [sessions, createDraft?.department, filterValues.semesters]
   );
 
-  function selectSession(session) {
+  async function selectSession(session) {
+    setNotice(null);
     setSelected(session);
     setDraft(toDraft(session));
-    setNotice(null);
+    try {
+      const fullSession = await api.session(session.id);
+      setSelected(fullSession);
+      setDraft(toDraft(fullSession));
+    } catch (error) {
+      setNotice({ type: 'error', text: error.body?.message || error.message });
+    }
   }
 
   function openCreateSession(seedSession = null) {
@@ -484,8 +486,8 @@ function App() {
         <div className="navbar-actions">
           <a className="nav-button" href="/api/export/theory.csv" title="Export theory CSV"><Download size={17} /> Theory CSV</a>
           <a className="nav-button" href="/api/export/lab.csv" title="Export lab CSV"><Download size={17} /> Lab CSV</a>
-          <a className="nav-button nav-button-compact" href="/api/export/theory.json" title="Export theory JSON">JSON</a>
-          <a className="nav-button nav-button-compact" href="/api/export/lab.json" title="Export lab JSON">JSON</a>
+          <a className="nav-button nav-button-compact" href="/api/export/theory.json" title="Export theory JSON">Theory JSON</a>
+          <a className="nav-button nav-button-compact" href="/api/export/lab.json" title="Export lab JSON">Lab JSON</a>
           <button className="nav-button" onClick={() => refreshAll(filters)} disabled={refreshing}>
             <RefreshCw size={17} className={refreshing ? 'spin-slow' : ''} /> Refresh
           </button>
@@ -624,12 +626,19 @@ function ScheduleTable({ sessions, meta, onSelect }) {
   const days = allDays.filter((day) => daysInData.has(day));
   const theorySlots = (meta?.theorySlots || []).map((slot) => ({ ...slot, scheduleType: 'theory' }));
   const labSlots = (meta?.labSessions || []).map((slot) => ({ ...slot, scheduleType: 'lab' }));
-  const usedTheorySlots = theorySlots.filter((slot) =>
-    sessions.some((session) => session.scheduleType === slot.scheduleType && session.slotKey === slot.slot_key)
-  );
-  const usedLabSlots = labSlots.filter((slot) =>
-    sessions.some((session) => session.scheduleType === slot.scheduleType && session.slotKey === slot.slot_key)
-  );
+  const sessionIndex = new Map();
+  const usedSlotKeys = new Set();
+
+  for (const session of sessions) {
+    const slotKey = `${session.scheduleType}:${session.slotKey}`;
+    const cellKey = `${session.day}:${slotKey}`;
+    usedSlotKeys.add(slotKey);
+    if (!sessionIndex.has(cellKey)) sessionIndex.set(cellKey, []);
+    sessionIndex.get(cellKey).push(session);
+  }
+
+  const usedTheorySlots = theorySlots.filter((slot) => usedSlotKeys.has(`${slot.scheduleType}:${slot.slot_key}`));
+  const usedLabSlots = labSlots.filter((slot) => usedSlotKeys.has(`${slot.scheduleType}:${slot.slot_key}`));
   const sections = [
     ['Theory Sessions', usedTheorySlots],
     ['Lab Sessions', usedLabSlots]
@@ -661,11 +670,7 @@ function ScheduleTable({ sessions, meta, onSelect }) {
                     <span>{slot.slot_key}</span>
                   </td>
                   {days.map((day) => {
-                    const cellSessions = sessions.filter((session) =>
-                      session.day === day &&
-                      session.scheduleType === slot.scheduleType &&
-                      session.slotKey === slot.slot_key
-                    );
+                    const cellSessions = sessionIndex.get(`${day}:${slot.scheduleType}:${slot.slot_key}`) || [];
                     return (
                       <td key={`${day}-${slot.scheduleType}-${slot.slot_key}`}>
                         {cellSessions.map((session) => (
@@ -1256,4 +1261,7 @@ function toOptionalNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+const rootElement = document.getElementById('root');
+const root = window.__changerRoot || createRoot(rootElement);
+window.__changerRoot = root;
+root.render(<App />);
