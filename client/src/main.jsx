@@ -39,6 +39,7 @@ const viewOptions = [
 ];
 
 function App() {
+  const [page, setPage] = useState('schedule');
   const [meta, setMeta] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [total, setTotal] = useState(0);
@@ -66,13 +67,7 @@ function App() {
   }
 
   async function loadSessions(nextFilters = filters) {
-    const serverFilters = {
-      type: nextFilters.type,
-      day: nextFilters.day,
-      department: nextFilters.department,
-      limit: 5000
-    };
-    const result = await api.sessions(serverFilters);
+    const result = await api.sessions({ limit: 5000 });
     setSessions(result.rows);
     setTotal(result.total);
     if (selected) {
@@ -85,7 +80,7 @@ function App() {
   }
 
   async function loadActivity() {
-    const result = await api.activity(12);
+    const result = await api.activity(50);
     setActivity(result);
   }
 
@@ -176,14 +171,28 @@ function App() {
       const courseText = `${session.courseCode || ''} ${session.courseName || ''}`.toLowerCase();
       const teacherText = `${session.teacherName || ''} ${session.staffCode || ''}`.toLowerCase();
       const roomText = `${session.roomNumber || ''} ${session.block || ''}`.toLowerCase();
-      return (!filters.semester || String(session.semester) === filters.semester) &&
+      return (!filters.type || session.scheduleType === filters.type) &&
+        (!filters.day || session.day === filters.day) &&
+        (!filters.department || session.department === filters.department) &&
+        (!filters.semester || String(session.semester) === filters.semester) &&
         (!filters.group || session.groupName === filters.group) &&
         (!filters.dayPattern || session.dayPattern === filters.dayPattern) &&
         (!courseNeedle || courseText.includes(courseNeedle)) &&
         (!teacherNeedle || teacherText.includes(teacherNeedle)) &&
         (!roomNeedle || roomText.includes(roomNeedle));
     });
-  }, [sessions, filters.semester, filters.group, filters.dayPattern, filters.course, filters.teacher, filters.room]);
+  }, [
+    sessions,
+    filters.type,
+    filters.day,
+    filters.department,
+    filters.semester,
+    filters.group,
+    filters.dayPattern,
+    filters.course,
+    filters.teacher,
+    filters.room
+  ]);
 
   const filterValues = useMemo(() => {
     const departments = new Set();
@@ -225,7 +234,18 @@ function App() {
   );
 
   function updateFilter(key, value) {
-    setFilters((current) => ({ ...current, [key]: value }));
+    setFilters((current) => {
+      const next = { ...current, [key]: value };
+      if (key === 'department') {
+        next.semester = '';
+        next.group = '';
+        next.dayPattern = '';
+      }
+      if (key === 'semester') {
+        next.group = '';
+      }
+      return next;
+    });
   }
 
   function selectSession(session) {
@@ -472,10 +492,11 @@ function App() {
       <nav className="navbar">
         <div className="navbar-brand">University Timetable Scheduler</div>
         <div className="navbar-links">
-          <button onClick={() => setViewType('department')}>Course Selection</button>
-          <button onClick={() => setViewType('room')}>Room Timetable</button>
+          <button className={page === 'schedule' && viewType === 'department' ? 'active' : ''} onClick={() => { setPage('schedule'); setViewType('department'); }}>Course Selection</button>
+          <button className={page === 'schedule' && viewType === 'room' ? 'active' : ''} onClick={() => { setPage('schedule'); setViewType('room'); }}>Room Timetable</button>
+          <button className={page === 'logs' ? 'active' : ''} onClick={() => setPage('logs')}>Logs</button>
         </div>
-        <div className="navbar-title">Combined Schedule View</div>
+        <div className="navbar-title">{page === 'logs' ? 'Change Logs' : 'Combined Schedule View'}</div>
         <div className="navbar-actions">
           <a className="nav-button" href="/api/export/theory.csv" title="Export theory CSV"><Download size={17} /> Theory CSV</a>
           <a className="nav-button" href="/api/export/lab.csv" title="Export lab CSV"><Download size={17} /> Lab CSV</a>
@@ -498,62 +519,66 @@ function App() {
           </div>
         )}
 
-        <section className="summary-stats">
-          <Metric label="Total Sessions" value={meta?.stats?.sessions || 0} tone="primary" />
-          <Metric label="Lab Sessions" value={countByType(displayedSessions, 'lab')} tone="info" />
-          <Metric label="Theory Sessions" value={countByType(displayedSessions, 'theory')} tone="success" />
-          <Metric label="Teachers" value={meta?.stats?.teachers || 0} tone="warning" />
-          <Metric label="Rooms" value={meta?.stats?.rooms || 0} tone="secondary" />
-          <Metric label="Conflicts" value={meta?.conflicts?.total || 0} tone="danger" />
-        </section>
+        {page === 'logs' ? (
+          <LogsPage activity={activity} lastLoadedAt={lastLoadedAt} onRefresh={() => refreshAll(filters)} refreshing={refreshing} />
+        ) : (
+          <>
+            <section className="summary-stats">
+              <Metric label="Total Sessions" value={meta?.stats?.sessions || 0} tone="primary" />
+              <Metric label="Lab Sessions" value={countByType(displayedSessions, 'lab')} tone="info" />
+              <Metric label="Theory Sessions" value={countByType(displayedSessions, 'theory')} tone="success" />
+              <Metric label="Teachers" value={meta?.stats?.teachers || 0} tone="warning" />
+              <Metric label="Rooms" value={meta?.stats?.rooms || 0} tone="secondary" />
+              <Metric label="Conflicts" value={meta?.conflicts?.total || 0} tone="danger" />
+            </section>
 
-        <section className="filter-section">
-          <div className="filter-header">
-            <h2>Filters</h2>
-            <div className="filter-actions">
-              <span>{displayedSessions.length} shown / {total} loaded{lastLoadedAt ? ` - refreshed ${lastLoadedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}</span>
-              <button className="tiny-action" onClick={() => setFilters(emptyFilters)} disabled={!hasFilters}>
-                <RotateCcw size={14} /> Reset
-              </button>
-            </div>
-          </div>
-          <div className="filters">
-            <Field label="View Type"><Select value={viewType} onChange={setViewType} options={viewOptions} /></Field>
-            <Field label="Department"><Select value={filters.department} onChange={(value) => updateFilter('department', value)} options={[['', 'All Departments'], ...filterValues.departments.map((value) => [value, value])]} /></Field>
-            <Field label="Semester"><Select value={filters.semester} onChange={(value) => updateFilter('semester', value)} options={[['', 'All Semesters'], ...filterValues.semesters.map((value) => [value, `Semester ${value}`])]} /></Field>
-            <Field label="Day"><Select value={filters.day} onChange={(value) => updateFilter('day', value)} options={[['', 'All Days'], ...(meta?.days || []).map((day) => [day.day, titleCase(day.day)])]} /></Field>
-            <Field label="Type"><Select value={filters.type} onChange={(value) => updateFilter('type', value)} options={[['', 'All Types'], ['theory', 'Theory Only'], ['lab', 'Lab Only']]} /></Field>
-            <Field label="Day Pattern"><Select value={filters.dayPattern} onChange={(value) => updateFilter('dayPattern', value)} options={[['', 'All Patterns'], ...filterValues.dayPatterns.map((value) => [value, value])]} /></Field>
-            <Field label="Group"><Select value={filters.group} onChange={(value) => updateFilter('group', value)} options={[['', 'All Groups'], ...filterValues.groups.map((value) => [value, value])]} /></Field>
-            <Field label="Search Course"><SearchInput value={filters.course} onChange={(value) => updateFilter('course', value)} placeholder="Course code/name" /></Field>
-            <Field label="Search Teacher"><SearchInput value={filters.teacher} onChange={(value) => updateFilter('teacher', value)} placeholder="Staff name/code" /></Field>
-            <Field label="Search Room"><SearchInput value={filters.room} onChange={(value) => updateFilter('room', value)} placeholder="Room/block" /></Field>
-          </div>
-        </section>
+            <section className="filter-section">
+              <div className="filter-header">
+                <h2>Filters</h2>
+                <div className="filter-actions">
+                  <span>{displayedSessions.length} shown / {total} loaded{lastLoadedAt ? ` - refreshed ${lastLoadedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}</span>
+                  <button className="tiny-action" onClick={() => setFilters(emptyFilters)} disabled={!hasFilters}>
+                    <RotateCcw size={14} /> Reset
+                  </button>
+                </div>
+              </div>
+              <div className="filters">
+                <Field label="View Type"><Select value={viewType} onChange={setViewType} options={viewOptions} /></Field>
+                <Field label="Department"><Select value={filters.department} onChange={(value) => updateFilter('department', value)} options={[['', 'All Departments'], ...filterValues.departments.map((value) => [value, value])]} /></Field>
+                <Field label="Semester"><Select value={filters.semester} onChange={(value) => updateFilter('semester', value)} options={[['', 'All Semesters'], ...filterValues.semesters.map((value) => [value, `Semester ${value}`])]} /></Field>
+                <Field label="Day"><Select value={filters.day} onChange={(value) => updateFilter('day', value)} options={[['', 'All Days'], ...(meta?.days || []).map((day) => [day.day, titleCase(day.day)])]} /></Field>
+                <Field label="Type"><Select value={filters.type} onChange={(value) => updateFilter('type', value)} options={[['', 'All Types'], ['theory', 'Theory Only'], ['lab', 'Lab Only']]} /></Field>
+                <Field label="Day Pattern"><Select value={filters.dayPattern} onChange={(value) => updateFilter('dayPattern', value)} options={[['', 'All Patterns'], ...filterValues.dayPatterns.map((value) => [value, value])]} /></Field>
+                <Field label="Group"><Select value={filters.group} onChange={(value) => updateFilter('group', value)} options={[['', 'All Groups'], ...filterValues.groups.map((value) => [value, value])]} /></Field>
+                <Field label="Search Course"><SearchInput value={filters.course} onChange={(value) => updateFilter('course', value)} placeholder="Course code/name" /></Field>
+                <Field label="Search Teacher"><SearchInput value={filters.teacher} onChange={(value) => updateFilter('teacher', value)} placeholder="Staff name/code" /></Field>
+                <Field label="Search Room"><SearchInput value={filters.room} onChange={(value) => updateFilter('room', value)} placeholder="Room/block" /></Field>
+              </div>
+            </section>
 
-        <section className="conflict-strip">
-          <strong><AlertTriangle size={16} /> Conflicts</strong>
-          <span>Teacher {conflicts?.summary?.teacher || 0}</span>
-          <span>Room {conflicts?.summary?.room || 0}</span>
-          <span>Capacity {conflicts?.summary?.capacity || 0}</span>
-        </section>
+            <section className="conflict-strip">
+              <strong><AlertTriangle size={16} /> Conflicts</strong>
+              <span>Teacher {conflicts?.summary?.teacher || 0}</span>
+              <span>Room {conflicts?.summary?.room || 0}</span>
+              <span>Capacity {conflicts?.summary?.capacity || 0}</span>
+            </section>
 
-        <ActivityPanel activity={activity} />
-
-        <section className="schedule-groups">
-          {groupedSessions.length === 0 ? (
-            <div className="card empty-card">No sessions match the current filters.</div>
-          ) : groupedSessions.map(([title, rows]) => (
-            <ScheduleGroup
-              key={title}
-              title={title}
-              sessions={rows}
-              meta={meta}
-              onSelect={selectSession}
-              onAdd={viewType === 'teacher' ? openCreateSession : null}
-            />
-          ))}
-        </section>
+            <section className="schedule-groups">
+              {groupedSessions.length === 0 ? (
+                <div className="card empty-card">No sessions match the current filters.</div>
+              ) : groupedSessions.map(([title, rows]) => (
+                <ScheduleGroup
+                  key={title}
+                  title={title}
+                  sessions={rows}
+                  meta={meta}
+                  onSelect={selectSession}
+                  onAdd={viewType === 'teacher' ? openCreateSession : null}
+                />
+              ))}
+            </section>
+          </>
+        )}
       </main>
 
       {draft && selected && (
@@ -697,8 +722,37 @@ function SessionBlock({ session, onSelect }) {
   );
 }
 
+function LogsPage({ activity, lastLoadedAt, onRefresh, refreshing }) {
+  const stats = getActivityStats(activity);
+
+  return (
+    <>
+      <section className="summary-stats">
+        <Metric label="Log Entries" value={activity.length} tone="primary" />
+        <Metric label="Applied" value={stats.applied} tone="success" />
+        <Metric label="Rejected" value={stats.rejected} tone="danger" />
+        <Metric label="Pending" value={stats.pending} tone="warning" />
+      </section>
+
+      <section className="logs-toolbar">
+        <div>
+          <h2>Change Logs</h2>
+          <span>{lastLoadedAt ? `Last refreshed ${lastLoadedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'No refresh yet'}</span>
+        </div>
+        <button className="tiny-action" onClick={onRefresh} disabled={refreshing}>
+          <RefreshCw size={14} className={refreshing ? 'spin-slow' : ''} /> Refresh Logs
+        </button>
+      </section>
+
+      <ActivityPanel activity={activity} />
+    </>
+  );
+}
+
 function ActivityPanel({ activity }) {
-  if (!activity?.length) return null;
+  if (!activity?.length) {
+    return <div className="card empty-card">No log entries yet.</div>;
+  }
 
   return (
     <section className="activity-panel">
@@ -707,7 +761,7 @@ function ActivityPanel({ activity }) {
         <span>Latest saved or rejected edits</span>
       </header>
       <div className="activity-list">
-        {activity.slice(0, 8).map((item) => (
+        {activity.map((item) => (
           <article className="activity-item" key={item.id}>
             <span className={`status-badge ${item.status}`}>{item.status}</span>
             <div className="activity-main">
@@ -1027,6 +1081,13 @@ function getGroupKey(session, viewType) {
 
 function countByType(rows, type) {
   return rows.filter((session) => session.scheduleType === type).length;
+}
+
+function getActivityStats(activity) {
+  return activity.reduce((stats, item) => {
+    stats[item.status] = (stats[item.status] || 0) + 1;
+    return stats;
+  }, { applied: 0, rejected: 0, pending: 0 });
 }
 
 function getAllowedDays(meta, department) {
