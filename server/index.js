@@ -85,6 +85,20 @@ const sessionCreateSchema = z.object({
   updatedBy: z.string().trim().max(120).optional()
 });
 
+function boundedInt(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(Math.trunc(parsed), min), max);
+}
+
+function positiveId(value, label = 'id') {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new HttpError(400, `Invalid ${label}`);
+  }
+  return parsed;
+}
+
 app.get('/api/health', async (_req, res, next) => {
   try {
     await pool.query('SELECT 1');
@@ -142,8 +156,8 @@ app.get('/api/meta', async (_req, res, next) => {
 
 app.get('/api/sessions', async (req, res, next) => {
   try {
-    const limit = Math.min(Number(req.query.limit || 80), 5000);
-    const offset = Math.max(Number(req.query.offset || 0), 0);
+    const limit = boundedInt(req.query.limit, 80, 1, 5000);
+    const offset = boundedInt(req.query.offset, 0, 0, 1000000);
     const values = [];
     const where = ["s.status = 'active'"];
 
@@ -198,7 +212,8 @@ app.get('/api/sessions', async (req, res, next) => {
 
 app.get('/api/sessions/:id', async (req, res, next) => {
   try {
-    const result = await pool.query(`${sessionSelectSql()} WHERE s.id = $1`, [req.params.id]);
+    const sessionId = positiveId(req.params.id, 'session id');
+    const result = await pool.query(`${sessionSelectSql()} WHERE s.id = $1`, [sessionId]);
     if (!result.rowCount) throw new HttpError(404, 'Session not found');
     res.json(mapSessionRow(result.rows[0]));
   } catch (error) {
@@ -210,7 +225,7 @@ app.get('/api/rooms', async (req, res, next) => {
   try {
     const slot = await resolveRequestedSlot(req.query.scheduleType, req.query.slotKey);
     const day = req.query.day;
-    const excludeId = Number(req.query.excludeSessionId || 0);
+    const excludeId = boundedInt(req.query.excludeSessionId, 0, 0, 1000000);
 
     const result = await pool.query(
       `SELECT r.*,
@@ -255,7 +270,7 @@ app.get('/api/teachers', async (req, res, next) => {
   try {
     const slot = await resolveRequestedSlot(req.query.scheduleType, req.query.slotKey);
     const day = req.query.day;
-    const excludeId = Number(req.query.excludeSessionId || 0);
+    const excludeId = boundedInt(req.query.excludeSessionId, 0, 0, 1000000);
     const q = req.query.q ? `%${req.query.q}%` : null;
 
     const result = await pool.query(
@@ -292,7 +307,7 @@ app.get('/api/teachers', async (req, res, next) => {
 
 app.get('/api/conflicts', async (req, res, next) => {
   try {
-    const limit = Math.min(Number(req.query.limit || 100), 500);
+    const limit = boundedInt(req.query.limit, 100, 1, 500);
     res.json(await getConflicts(limit));
   } catch (error) {
     next(error);
@@ -301,7 +316,7 @@ app.get('/api/conflicts', async (req, res, next) => {
 
 app.get('/api/activity', async (req, res, next) => {
   try {
-    const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 100);
+    const limit = boundedInt(req.query.limit, 20, 1, 100);
     const result = await pool.query(
       `SELECT
          er.id,
@@ -557,7 +572,7 @@ app.post('/api/sessions', async (req, res, next) => {
 
 app.delete('/api/sessions/:id', async (req, res, next) => {
   try {
-    const sessionId = Number(req.params.id);
+    const sessionId = positiveId(req.params.id, 'session id');
     const updatedBy = String(req.query.updatedBy || req.body?.updatedBy || 'staff').trim().slice(0, 120);
 
     const result = await withTransaction(async (client) => {
@@ -618,7 +633,7 @@ app.delete('/api/sessions/:id', async (req, res, next) => {
 app.patch('/api/sessions/:id', async (req, res, next) => {
   try {
     const payload = sessionPatchSchema.parse(req.body);
-    const sessionId = Number(req.params.id);
+    const sessionId = positiveId(req.params.id, 'session id');
 
     const result = await withTransaction(async (client) => {
       const request = await client.query(

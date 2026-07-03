@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Plus,
@@ -16,19 +16,8 @@ import {
   X
 } from 'lucide-react';
 import { api } from './api.js';
+import { useChangerStore } from './store.js';
 import './styles.css';
-
-const emptyFilters = {
-  type: '',
-  day: '',
-  department: '',
-  semester: '',
-  group: '',
-  dayPattern: '',
-  course: '',
-  teacher: '',
-  room: ''
-};
 
 const viewOptions = [
   ['department', 'Department-wise'],
@@ -39,26 +28,51 @@ const viewOptions = [
 ];
 
 function App() {
-  const [page, setPage] = useState('schedule');
-  const [meta, setMeta] = useState(null);
-  const [sessions, setSessions] = useState([]);
-  const [total, setTotal] = useState(0);
-  const [filters, setFilters] = useState(emptyFilters);
-  const [viewType, setViewType] = useState('department');
-  const [selected, setSelected] = useState(null);
-  const [draft, setDraft] = useState(null);
-  const [createDraft, setCreateDraft] = useState(null);
-  const [rooms, setRooms] = useState([]);
-  const [teachers, setTeachers] = useState([]);
-  const [createRooms, setCreateRooms] = useState([]);
-  const [createTeachers, setCreateTeachers] = useState([]);
-  const [conflicts, setConflicts] = useState(null);
-  const [activity, setActivity] = useState([]);
-  const [lastLoadedAt, setLastLoadedAt] = useState(null);
-  const [notice, setNotice] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const {
+    page,
+    setPage,
+    meta,
+    setMeta,
+    sessions,
+    setSessions,
+    total,
+    setTotal,
+    filters,
+    viewType,
+    setViewType,
+    selected,
+    setSelected,
+    draft,
+    setDraft,
+    createDraft,
+    setCreateDraft,
+    rooms,
+    setRooms,
+    teachers,
+    setTeachers,
+    createRooms,
+    setCreateRooms,
+    createTeachers,
+    setCreateTeachers,
+    conflicts,
+    setConflicts,
+    activity,
+    setActivity,
+    lastLoadedAt,
+    setLastLoadedAt,
+    notice,
+    setNotice,
+    loading,
+    setLoading,
+    refreshing,
+    setRefreshing,
+    saving,
+    setSaving,
+    updateFilter,
+    resetFilters,
+    closeEditor,
+    closeCreateSession
+  } = useChangerStore();
 
   async function loadMeta() {
     const [metaResult, conflictResult] = await Promise.all([api.meta(), api.conflicts()]);
@@ -75,6 +89,8 @@ function App() {
       if (refreshed) {
         setSelected(refreshed);
         setDraft(toDraft(refreshed));
+      } else {
+        closeEditor();
       }
     }
   }
@@ -99,15 +115,6 @@ function App() {
       .catch((error) => setNotice({ type: 'error', text: error.message }))
       .finally(() => setLoading(false));
   }, []);
-
-  useEffect(() => {
-    const handle = setTimeout(() => {
-      loadSessions(filters)
-        .then(() => setLastLoadedAt(new Date()))
-        .catch((error) => setNotice({ type: 'error', text: error.message }));
-    }, 250);
-    return () => clearTimeout(handle);
-  }, [filters.type, filters.day, filters.department]);
 
   useEffect(() => {
     const onFocus = () => {
@@ -233,21 +240,6 @@ function App() {
     [sessions, createDraft?.department, filterValues.semesters]
   );
 
-  function updateFilter(key, value) {
-    setFilters((current) => {
-      const next = { ...current, [key]: value };
-      if (key === 'department') {
-        next.semester = '';
-        next.group = '';
-        next.dayPattern = '';
-      }
-      if (key === 'semester') {
-        next.group = '';
-      }
-      return next;
-    });
-  }
-
   function selectSession(session) {
     setSelected(session);
     setDraft(toDraft(session));
@@ -291,17 +283,6 @@ function App() {
       updatedBy: ''
     });
     setNotice(null);
-  }
-
-  function closeCreateSession() {
-    setCreateDraft(null);
-    setCreateRooms([]);
-    setCreateTeachers([]);
-  }
-
-  function closeEditor() {
-    setSelected(null);
-    setDraft(null);
   }
 
   function updateDraft(key, value) {
@@ -537,7 +518,7 @@ function App() {
                 <h2>Filters</h2>
                 <div className="filter-actions">
                   <span>{displayedSessions.length} shown / {total} loaded{lastLoadedAt ? ` - refreshed ${lastLoadedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}</span>
-                  <button className="tiny-action" onClick={() => setFilters(emptyFilters)} disabled={!hasFilters}>
+                  <button className="tiny-action" onClick={resetFilters} disabled={!hasFilters}>
                     <RotateCcw size={14} /> Reset
                   </button>
                 </div>
