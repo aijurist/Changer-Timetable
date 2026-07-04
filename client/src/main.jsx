@@ -1196,20 +1196,8 @@ function getAllowedDays(meta, department) {
   return filtered.length ? filtered : allDays;
 }
 
-function getAllowedSlots(meta, scheduleType, department) {
-  const baseSlots = scheduleType === 'lab' ? meta?.labSessions || [] : meta?.theorySlots || [];
-  const policy = findPolicy(meta, department);
-  const shift = (meta?.shifts || []).find((item) => item.shift_id === policy?.shift_id);
-  if (!shift) return baseSlots;
-  if (scheduleType === 'lab' && shift.lab_sessions?.length) {
-    const allowed = new Set(shift.lab_sessions);
-    return baseSlots.filter((slot) => allowed.has(slot.slot_key));
-  }
-  if (scheduleType === 'theory' && shift.theory_slot_indexes?.length) {
-    const allowed = new Set(shift.theory_slot_indexes.map(Number));
-    return baseSlots.filter((slot) => allowed.has(Number(slot.slot_index)));
-  }
-  return baseSlots;
+function getAllowedSlots(meta, scheduleType) {
+  return scheduleType === 'lab' ? meta?.labSessions || [] : meta?.theorySlots || [];
 }
 
 function findPolicy(meta, department) {
