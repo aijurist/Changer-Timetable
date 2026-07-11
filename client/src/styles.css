@@ -766,6 +766,12 @@ input:focus,
   color: #425260;
 }
 
+.session-batch {
+  margin-top: 2px;
+  color: #7c2d12;
+  font-weight: 700;
+}
+
 .session-instance {
   color: #6c757d;
 }

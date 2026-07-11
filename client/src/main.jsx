@@ -734,6 +734,7 @@ function ScheduleTable({ sessions, meta, onSelect }) {
 
 function SessionBlock({ session, onSelect }) {
   const groupClass = getGroupClass(session.groupName);
+  const batchText = formatBatchLabel(session);
   const className = [
     'session-block',
     session.scheduleType === 'lab' ? 'lab-session' : 'theory-session',
@@ -749,6 +750,7 @@ function SessionBlock({ session, onSelect }) {
       </span>
       <span className="session-teacher">{session.teacherName || '-'}</span>
       <span className="session-room">{session.roomNumber || '-'}</span>
+      {session.scheduleType === 'lab' && <span className="session-batch">{batchText}</span>}
       <small className="session-instance">{session.courseInstanceId || session.id}</small>
     </button>
   );
@@ -1361,6 +1363,19 @@ function getGroupClass(groupName) {
 
 function titleCase(value) {
   return String(value || '').charAt(0).toUpperCase() + String(value || '').slice(1);
+}
+
+function formatBatchLabel(session) {
+  if (session.scheduleType !== 'lab') return '';
+  const explicit = [
+    session.batchLabel,
+    session.batchInfo
+  ].find((value) => String(value || '').trim());
+  if (explicit) return String(explicit).trim();
+  if (session.batchNumber) {
+    return session.numBatches ? `Batch ${session.batchNumber}/${session.numBatches}` : `Batch ${session.batchNumber}`;
+  }
+  return 'No-Batch';
 }
 
 function formatActivitySession(session = {}) {
