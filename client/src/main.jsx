@@ -864,11 +864,7 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
           <label>Room
             <SearchableSelect
               value={draft.roomId}
-              options={rooms.map((room) => ({
-                value: room.id,
-                label: `${room.isAvailable ? '' : `[booked${room.occupyingCourseCode ? ` by ${room.occupyingCourseCode}` : ''}] `}${room.roomNumber} - ${room.block || '-'} - cap ${room.maxCapacity || room.minCapacity || '-'}`,
-                searchText: `${room.roomNumber || ''} ${room.block || ''} ${room.description || ''} ${room.roomType || ''} ${room.occupyingCourseCode || ''} ${room.occupyingTeacherName || ''}`
-              }))}
+              options={toRoomOptions(rooms, true)}
               placeholder="Search room/block"
               onChange={(value) => {
                 const roomId = Number(value);
@@ -1041,11 +1037,7 @@ function AddSessionModal({ draft, slots, rooms, teachers, days, departments, sem
           <label>Room
             <SearchableSelect
               value={draft.roomId}
-              options={rooms.map((room) => ({
-                value: room.id,
-                label: `${room.isAvailable ? '' : '[booked] '}${room.roomNumber} - ${room.block || '-'} - cap ${room.maxCapacity || room.minCapacity || '-'}`,
-                searchText: `${room.roomNumber || ''} ${room.block || ''} ${room.description || ''} ${room.roomType || ''}`
-              }))}
+              options={toRoomOptions(rooms)}
               placeholder="Search room/block"
               emptyLabel="Select room"
               onChange={(value) => onChange('roomId', Number(value))}
@@ -1159,6 +1151,7 @@ function SearchableSelect({ value, options, onChange, placeholder, emptyLabel = 
     if (!needle) return true;
     return `${option.searchText || ''} ${option.label || ''}`.toLowerCase().includes(needle);
   });
+  const groupedOptions = groupSelectOptions(visibleOptions);
 
   function choose(optionValue) {
     onChange(optionValue);
@@ -1200,16 +1193,26 @@ function SearchableSelect({ value, options, onChange, placeholder, emptyLabel = 
             placeholder={placeholder}
           />
           <div className="searchable-select-options">
-            {visibleOptions.length ? visibleOptions.map((option) => (
-              <button
-                type="button"
-                key={option.value}
-                className={String(option.value) === String(value) ? 'selected' : ''}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => choose(option.value)}
-              >
-                {option.label}
-              </button>
+            {visibleOptions.length ? groupedOptions.map((group) => (
+              <div className="searchable-select-group" key={group.name}>
+                {group.name !== '__ungrouped' && (
+                  <div className="searchable-select-group-title">
+                    <span>{group.name}</span>
+                    {group.meta && <small>{group.meta}</small>}
+                  </div>
+                )}
+                {group.options.map((option) => (
+                  <button
+                    type="button"
+                    key={option.value}
+                    className={String(option.value) === String(value) ? 'selected' : ''}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => choose(option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
             )) : (
               <div className="searchable-select-empty">No matches</div>
             )}
@@ -1218,6 +1221,63 @@ function SearchableSelect({ value, options, onChange, placeholder, emptyLabel = 
       )}
     </div>
   );
+}
+
+function groupSelectOptions(options) {
+  const groups = new Map();
+  for (const option of options) {
+    const name = option.group || '__ungrouped';
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(option);
+  }
+  return [...groups.entries()].map(([name, groupOptions]) => {
+    const freeCount = groupOptions.filter((option) => option.isAvailable).length;
+    const hasAvailability = groupOptions.some((option) => typeof option.isAvailable === 'boolean');
+    return {
+      name,
+      options: groupOptions,
+      meta: hasAvailability ? `${freeCount}/${groupOptions.length} free` : null
+    };
+  });
+}
+
+function toRoomOptions(rooms, includeOccupant = false) {
+  return [...rooms]
+    .sort((left, right) => {
+      const blockCompare = roomBlockSortKey(left.block).localeCompare(roomBlockSortKey(right.block));
+      if (blockCompare) return blockCompare;
+      if (left.isAvailable !== right.isAvailable) return left.isAvailable ? -1 : 1;
+      return String(left.roomNumber || '').localeCompare(String(right.roomNumber || ''), undefined, { numeric: true });
+    })
+    .map((room) => {
+      const capacity = room.maxCapacity || room.minCapacity || '-';
+      const bookedBy = includeOccupant && room.occupyingCourseCode ? ` by ${room.occupyingCourseCode}` : '';
+      return {
+        value: room.id,
+        label: `${room.isAvailable ? '[free]' : `[booked${bookedBy}]`} ${room.roomNumber} - cap ${capacity}`,
+        group: roomBlockLabel(room.block),
+        isAvailable: room.isAvailable,
+        searchText: `${room.roomNumber || ''} ${room.block || ''} ${room.description || ''} ${room.roomType || ''} ${room.occupyingCourseCode || ''} ${room.occupyingTeacherName || ''}`
+      };
+    });
+}
+
+function roomBlockLabel(block) {
+  const value = String(block || '').trim();
+  if (!value) return 'Other Rooms';
+  if (/tech\s*lounge|techlounge/i.test(value)) return 'Techlounge';
+  if (/^[a-z]$/i.test(value)) return `${value.toUpperCase()} Block`;
+  if (/^[a-z]\s*block$/i.test(value)) return value.replace(/^([a-z])/i, (letter) => letter.toUpperCase());
+  return value;
+}
+
+function roomBlockSortKey(block) {
+  const label = roomBlockLabel(block).toLowerCase();
+  const match = label.match(/^([a-z]) block$/);
+  if (match) return `0-${match[1]}`;
+  if (label === 'techlounge') return '1-techlounge';
+  if (label === 'other rooms') return '9-other';
+  return `5-${label}`;
 }
 
 function SelectNative({ value, onChange, days }) {

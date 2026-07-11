@@ -402,7 +402,36 @@ input:focus,
   display: grid;
   max-height: 230px;
   overflow-y: auto;
+  gap: 6px;
+}
+
+.searchable-select-group {
+  display: grid;
   gap: 2px;
+}
+
+.searchable-select-group-title {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: #f1f5f9;
+  color: #334155;
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.searchable-select-group-title small {
+  color: #64748b;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: none;
 }
 
 .searchable-select-options button {
