@@ -744,11 +744,10 @@ function SessionBlock({ session, onSelect }) {
 
   return (
     <button className={`${className} editable-session`} onClick={() => onSelect(session)} title="Edit session">
-      <span className="session-header">
-        <strong className="session-code">{session.courseCode}</strong>
-        {session.groupName && <span className="group-number">{shortGroup(session.groupName)}</span>}
-      </span>
+      {session.groupName && <span className={`group-number ${groupClass}-badge`}>{shortGroup(session.groupName)}</span>}
       <span className="session-teacher">{session.teacherName || '-'}</span>
+      <strong className="session-code">{session.courseCode}</strong>
+      <span className="session-course">{session.courseName || '-'}</span>
       <span className="session-room">{session.roomNumber || '-'}</span>
       {session.scheduleType === 'lab' && <span className="session-batch">{batchText}</span>}
       <small className="session-instance">{session.courseInstanceId || session.id}</small>
