@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import {
   Plus,
   AlertTriangle,
+  ArrowLeftRight,
   Check,
   Clock,
   Database,
@@ -112,6 +113,15 @@ function App() {
       .catch((error) => setNotice({ type: 'error', text: error.message }))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (!notice) return undefined;
+    const timeout = window.setTimeout(
+      () => setNotice(null),
+      notice.type === 'success' ? 4500 : 8000
+    );
+    return () => window.clearTimeout(timeout);
+  }, [notice, setNotice]);
 
   useEffect(() => {
     const onFocus = () => {
@@ -320,15 +330,12 @@ function App() {
         rowVersion: draft.rowVersion,
         updatedBy: draft.updatedBy || 'staff'
       });
-      setSelected(result.session);
-      setDraft(toDraft(result.session));
+      closeEditor();
       setNotice({
         type: 'success',
         text: result.warnings?.length ? `Saved with ${result.warnings.length} warning(s).` : 'Session updated successfully.'
       });
-      await Promise.all([loadMeta(), loadSessions(filters)]);
-      await loadActivity();
-      setLastLoadedAt(new Date());
+      await refreshAll(filters);
     } catch (error) {
       const details = error.body?.conflicts?.map((conflict) => conflict.message).join(' ');
       setNotice({ type: 'error', text: details || error.message });
@@ -350,6 +357,40 @@ function App() {
       await api.deleteSession(selected.id, { updatedBy: draft.updatedBy || 'staff' });
       closeEditor();
       setNotice({ type: 'success', text: 'Session deleted successfully.' });
+      await refreshAll(filters);
+    } catch (error) {
+      setNotice({ type: 'error', text: error.body?.message || error.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function swapSelectedRoom(room) {
+    if (!selected || !draft || !room?.occupyingSessionId) return;
+    const occupantDetails = [
+      room.occupyingCourseCode || 'Booked session',
+      room.occupyingCourseName,
+      room.occupyingTeacherName ? `Staff: ${room.occupyingTeacherName}` : null,
+      room.occupyingTimeLabel ? `Time: ${titleCase(draft.day)} ${room.occupyingTimeLabel}` : null
+    ].filter(Boolean).join('\n');
+    const confirmed = window.confirm(
+      `Confirm room swap?\n\nSelected session:\n${selected.courseCode} - ${selected.courseName}\nStaff: ${selected.teacherName || '-'}\nFrom: ${selected.roomNumber || '-'}\nTo: ${room.roomNumber}\n\nCurrent occupant of ${room.roomNumber}:\n${occupantDetails}\n\nAfter swap:\n${selected.courseCode} uses ${room.roomNumber}\n${room.occupyingCourseCode || 'Booked session'} uses ${selected.roomNumber || 'the current room'}`
+    );
+    if (!confirmed) return;
+
+    setSaving(true);
+    setNotice(null);
+    try {
+      await api.swapRooms(draft.id, {
+        otherSessionId: room.occupyingSessionId,
+        rowVersion: draft.rowVersion,
+        updatedBy: draft.updatedBy || 'staff'
+      });
+      closeEditor();
+      setNotice({
+        type: 'success',
+        text: `Rooms swapped successfully with ${room.occupyingCourseCode || 'the booked session'}.`
+      });
       await refreshAll(filters);
     } catch (error) {
       setNotice({ type: 'error', text: error.body?.message || error.message });
@@ -456,8 +497,6 @@ function App() {
       });
       closeCreateSession();
       await refreshAll(filters);
-      setSelected(result.session);
-      setDraft(toDraft(result.session));
     } catch (error) {
       const details = error.body?.conflicts?.map((conflict) => conflict.message).join(' ');
       setNotice({ type: 'error', text: details || error.message });
@@ -501,9 +540,10 @@ function App() {
 
       <main className="page">
         {notice && (
-          <div className={`notice ${notice.type}`}>
+          <div className={`toast ${notice.type}`} role="status" aria-live="polite">
             {notice.type === 'success' ? <Check size={16} /> : <AlertTriangle size={16} />}
             <span>{notice.text}</span>
+            <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notice"><X size={14} /></button>
           </div>
         )}
 
@@ -580,6 +620,7 @@ function App() {
           onChange={updateDraft}
           onClose={closeEditor}
           onSave={saveDraft}
+          onSwapRoom={swapSelectedRoom}
           onDelete={deleteSelectedSession}
           days={meta?.days || []}
         />
@@ -771,7 +812,14 @@ function ActivityPanel({ activity }) {
   );
 }
 
-function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onClose, onSave, onDelete, days }) {
+function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onClose, onSave, onSwapRoom, onDelete, days }) {
+  const selectedRoom = rooms.find((room) => String(room.id) === String(draft.roomId));
+  const canSwapRoom = selectedRoom &&
+    !selectedRoom.isAvailable &&
+    selectedRoom.occupyingSessionId &&
+    String(selectedRoom.occupyingSessionId) !== String(draft.id) &&
+    String(selectedRoom.id) !== String(selected.roomId);
+
   return (
     <div className="modal-backdrop">
       <section className="edit-modal">
@@ -817,8 +865,8 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
               value={draft.roomId}
               options={rooms.map((room) => ({
                 value: room.id,
-                label: `${room.isAvailable ? '' : '[booked] '}${room.roomNumber} - ${room.block || '-'} - cap ${room.maxCapacity || room.minCapacity || '-'}`,
-                searchText: `${room.roomNumber || ''} ${room.block || ''} ${room.description || ''} ${room.roomType || ''}`
+                label: `${room.isAvailable ? '' : `[booked${room.occupyingCourseCode ? ` by ${room.occupyingCourseCode}` : ''}] `}${room.roomNumber} - ${room.block || '-'} - cap ${room.maxCapacity || room.minCapacity || '-'}`,
+                searchText: `${room.roomNumber || ''} ${room.block || ''} ${room.description || ''} ${room.roomType || ''} ${room.occupyingCourseCode || ''} ${room.occupyingTeacherName || ''}`
               }))}
               placeholder="Search room/block"
               onChange={(value) => {
@@ -829,6 +877,28 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
               }}
             />
           </label>
+
+          {selectedRoom && !selectedRoom.isAvailable && (
+            <div className="swap-room-panel">
+              <div>
+                <strong>{selectedRoom.roomNumber} is booked</strong>
+                <span>
+                  {selectedRoom.occupyingCourseCode || 'Another session'}
+                  {selectedRoom.occupyingTeacherName ? ` - ${selectedRoom.occupyingTeacherName}` : ''}
+                  {selectedRoom.occupyingTimeLabel ? ` - ${selectedRoom.occupyingTimeLabel}` : ''}
+                </span>
+              </div>
+              <button
+                className="secondary-action"
+                type="button"
+                onClick={() => onSwapRoom(selectedRoom)}
+                disabled={!canSwapRoom || saving}
+                title={canSwapRoom ? 'Swap the selected session room with this booked room' : 'Room swap is available only for another booked session'}
+              >
+                <ArrowLeftRight size={17} /> Swap Rooms
+              </button>
+            </div>
+          )}
 
           <div className="form-grid">
             <label>Students<input type="number" min="0" value={draft.studentCount ?? ''} onChange={(event) => onChange('studentCount', toOptionalNumber(event.target.value))} /></label>

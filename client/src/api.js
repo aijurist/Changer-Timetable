@@ -33,6 +33,10 @@ export const api = {
     method: 'PATCH',
     body: JSON.stringify(payload)
   }),
+  swapRooms: (id, payload) => request(`/api/sessions/${id}/swap-room`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  }),
   deleteSession: (id, payload = {}) => request(`/api/sessions/${id}`, {
     method: 'DELETE',
     body: JSON.stringify(payload)

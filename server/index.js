@@ -6,6 +6,7 @@ import { config } from './config.js';
 import { pool, withClient, withTransaction } from './db.js';
 import {
   buildResourceKeys,
+  effectiveStudentCount,
   findDepartmentPolicy,
   findSessionConflicts,
   lockResources,
@@ -84,6 +85,12 @@ const sessionCreateSchema = z.object({
   tutorialHours: z.union([z.coerce.number().nonnegative(), z.null()]).optional(),
   coScheduleInfo: z.union([z.string().trim().max(300), z.null()]).optional(),
   allowCapacityOverride: z.boolean().optional(),
+  updatedBy: z.string().trim().max(120).optional()
+});
+
+const roomSwapSchema = z.object({
+  otherSessionId: z.coerce.number().int().positive(),
+  rowVersion: z.coerce.number().int().positive().optional(),
   updatedBy: z.string().trim().max(120).optional()
 });
 
@@ -238,6 +245,11 @@ app.get('/api/rooms', async (req, res, next) => {
 
     const result = await pool.query(
       `SELECT r.*,
+        occupant.id AS occupying_session_id,
+        occupant.course_code AS occupying_course_code,
+        occupant.course_name AS occupying_course_name,
+        occupant.time_label AS occupying_time_label,
+        occupant.teacher_name AS occupying_teacher_name,
         CASE
           WHEN $1::text IS NULL OR $2::int IS NULL THEN true
           WHEN r.allow_conflicts THEN true
@@ -253,6 +265,21 @@ app.get('/api/rooms', async (req, res, next) => {
           )
         END AS is_available
        FROM rooms r
+       LEFT JOIN LATERAL (
+         SELECT s.id, s.course_code, s.course_name, s.time_label, t.name AS teacher_name
+         FROM sessions s
+         JOIN teachers t ON t.id = s.teacher_id
+         WHERE $1::text IS NOT NULL
+           AND $2::int IS NOT NULL
+           AND s.status = 'active'
+           AND s.id <> $5
+           AND s.room_id = r.id
+           AND s.day = $1
+           AND s.allow_room_conflicts = false
+           AND int4range(s.start_minute, s.end_minute, '[)') && int4range($2, $3, '[)')
+         ORDER BY s.start_minute, s.id
+         LIMIT 1
+       ) occupant ON true
        WHERE ($4::text IS NULL OR r.room_number ILIKE $4 OR r.block ILIKE $4)
        ORDER BY is_available DESC,
         CASE WHEN $6::text = 'lab' AND r.is_lab THEN 0 ELSE 1 END,
@@ -822,6 +849,194 @@ app.patch('/api/sessions/:id', async (req, res, next) => {
   }
 });
 
+app.post('/api/sessions/:id/swap-room', async (req, res, next) => {
+  try {
+    const payload = roomSwapSchema.parse(req.body);
+    const sessionId = positiveId(req.params.id, 'session id');
+    const updatedBy = payload.updatedBy || 'staff';
+
+    if (sessionId === payload.otherSessionId) {
+      throw new HttpError(400, 'Pick another booked session to swap with.');
+    }
+
+    const result = await withTransaction(async (client) => {
+      const request = await client.query(
+        `INSERT INTO edit_requests (session_id, requested_by, payload)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [sessionId, updatedBy || null, { action: 'swap_room', ...payload }]
+      );
+      const requestId = request.rows[0].id;
+
+      const ids = [sessionId, payload.otherSessionId].sort((a, b) => a - b);
+      const locked = await client.query(
+        `SELECT *
+         FROM sessions
+         WHERE id = ANY($1::int[])
+         ORDER BY id
+         FOR UPDATE`,
+        [ids]
+      );
+      if (locked.rowCount !== 2) throw new HttpError(404, 'One of the sessions was not found.');
+
+      const current = locked.rows.find((row) => row.id === sessionId);
+      const other = locked.rows.find((row) => row.id === payload.otherSessionId);
+      if (current.status !== 'active' || other.status !== 'active') {
+        await rejectEdit(client, requestId, 'inactive_session', { sessionId, otherSessionId: payload.otherSessionId });
+        return { status: 409, body: { success: false, message: 'Both sessions must be active before rooms can be swapped.' } };
+      }
+
+      if (payload.rowVersion && payload.rowVersion !== current.row_version) {
+        const details = { currentVersion: current.row_version };
+        await rejectEdit(client, requestId, 'stale_session', details);
+        return { status: 409, body: { success: false, message: 'Session was updated by someone else. Refresh and try again.', details } };
+      }
+
+      if (current.room_id === other.room_id) {
+        await rejectEdit(client, requestId, 'same_room', { roomId: current.room_id });
+        return { status: 409, body: { success: false, message: 'Both sessions already use the same room.' } };
+      }
+
+      const currentRoom = await client.query('SELECT * FROM rooms WHERE id = $1', [current.room_id]);
+      const otherRoom = await client.query('SELECT * FROM rooms WHERE id = $1', [other.room_id]);
+      if (!currentRoom.rowCount || !otherRoom.rowCount) throw new HttpError(400, 'One of the rooms does not exist.');
+
+      const currentNextCapacity = getRoomCapacity(otherRoom.rows[0].room_number, otherRoom.rows[0]) ?? current.capacity;
+      const otherNextCapacity = getRoomCapacity(currentRoom.rows[0].room_number, currentRoom.rows[0]) ?? other.capacity;
+      const capacityConflicts = [
+        { session: current, capacity: currentNextCapacity, roomNumber: otherRoom.rows[0].room_number },
+        { session: other, capacity: otherNextCapacity, roomNumber: currentRoom.rows[0].room_number }
+      ].filter(({ session, capacity }) => {
+        const effectiveCount = effectiveStudentCount(session);
+        return !session.allow_capacity_override && effectiveCount > 0 && capacity && effectiveCount > Number(capacity);
+      });
+
+      if (capacityConflicts.length) {
+        const conflict = capacityConflicts[0];
+        await rejectEdit(client, requestId, 'capacity_violation', { sessionId: conflict.session.id, roomNumber: conflict.roomNumber });
+        return {
+          status: 409,
+          body: {
+            success: false,
+            message: `${conflict.session.course_code} cannot move to ${conflict.roomNumber}; effective student count exceeds room capacity.`
+          }
+        };
+      }
+
+      await lockResources(client, [
+        ...buildResourceKeys(current, { ...current, room_id: other.room_id }),
+        ...buildResourceKeys(other, { ...other, room_id: current.room_id })
+      ]);
+
+      const thirdPartyConflicts = await client.query(
+        `SELECT s.id, s.course_code, r.room_number
+         FROM sessions s
+         JOIN rooms r ON r.id = s.room_id
+         WHERE s.status = 'active'
+           AND s.id <> ALL($1::int[])
+           AND s.allow_room_conflicts = false
+           AND (
+             (
+               s.room_id = $2
+               AND s.day = $3
+               AND int4range(s.start_minute, s.end_minute, '[)') && int4range($4, $5, '[)')
+             )
+             OR (
+               s.room_id = $6
+               AND s.day = $7
+               AND int4range(s.start_minute, s.end_minute, '[)') && int4range($8, $9, '[)')
+             )
+           )
+         LIMIT 1`,
+        [
+          [sessionId, payload.otherSessionId],
+          other.room_id,
+          current.day,
+          current.start_minute,
+          current.end_minute,
+          current.room_id,
+          other.day,
+          other.start_minute,
+          other.end_minute
+        ]
+      );
+
+      if (thirdPartyConflicts.rowCount) {
+        const conflict = thirdPartyConflicts.rows[0];
+        await rejectEdit(client, requestId, 'room_conflict', { conflict });
+        return {
+          status: 409,
+          body: { success: false, message: `${conflict.room_number} is already booked by ${conflict.course_code}. Refresh and try again.` }
+        };
+      }
+
+      const beforeCurrent = await serializeSession(client, sessionId);
+      const beforeOther = await serializeSession(client, payload.otherSessionId);
+      await client.query("SET LOCAL app.seed_mode = 'on'");
+      await client.query(
+        `UPDATE sessions
+         SET room_id = $2,
+             capacity = $3,
+             allow_room_conflicts = $4,
+             row_version = row_version + 1,
+             updated_by = $5
+         WHERE id = $1`,
+        [
+          sessionId,
+          other.room_id,
+          currentNextCapacity,
+          otherRoom.rows[0].allow_conflicts,
+          updatedBy || null
+        ]
+      );
+      await client.query(
+        `UPDATE sessions
+         SET room_id = $2,
+             capacity = $3,
+             allow_room_conflicts = $4,
+             row_version = row_version + 1,
+             updated_by = $5
+         WHERE id = $1`,
+        [
+          payload.otherSessionId,
+          current.room_id,
+          otherNextCapacity,
+          currentRoom.rows[0].allow_conflicts,
+          updatedBy || null
+        ]
+      );
+
+      const afterCurrent = await serializeSession(client, sessionId);
+      const afterOther = await serializeSession(client, payload.otherSessionId);
+      await client.query(
+        `INSERT INTO session_audit_log (session_id, edit_request_id, changed_by, before_payload, after_payload)
+         VALUES ($1, $2, $3, $4, $5), ($6, $2, $3, $7, $8)`,
+        [sessionId, requestId, updatedBy || null, beforeCurrent, afterCurrent, payload.otherSessionId, beforeOther, afterOther]
+      );
+      await client.query(
+        `UPDATE edit_requests
+         SET status = 'applied', result = $2, completed_at = now()
+         WHERE id = $1`,
+        [requestId, { action: 'swap_room', swappedWith: payload.otherSessionId }]
+      );
+
+      return {
+        status: 200,
+        body: {
+          success: true,
+          session: afterCurrent,
+          swappedSession: afterOther,
+          editRequestId: requestId
+        }
+      };
+    });
+
+    res.status(result.status).json(result.body);
+  } catch (error) {
+    next(error);
+  }
+});
+
 async function rejectEdit(client, requestId, reason, result) {
   await client.query(
     `UPDATE edit_requests
@@ -1052,7 +1267,12 @@ function mapRoomRow(row) {
     maxCapacity: getRoomCapacity(row.room_number, row),
     allowConflicts: row.allow_conflicts,
     isPreferredLabRoom: isPreferredLabRoom(row.room_number, row),
-    isAvailable: row.is_available
+    isAvailable: row.is_available,
+    occupyingSessionId: row.occupying_session_id,
+    occupyingCourseCode: row.occupying_course_code,
+    occupyingCourseName: row.occupying_course_name,
+    occupyingTimeLabel: row.occupying_time_label,
+    occupyingTeacherName: row.occupying_teacher_name
   };
 }
 
