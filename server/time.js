@@ -1,10 +1,19 @@
 export function normalizeDay(day) {
   const value = String(day || '').trim().toLowerCase();
   const aliases = {
+    mon: 'monday',
+    monday: 'monday',
     tue: 'tuesday',
+    tues: 'tuesday',
+    tuesday: 'tuesday',
+    wed: 'wed',
     wednesday: 'wed',
     thu: 'thur',
+    thur: 'thur',
+    thurs: 'thur',
     thursday: 'thur',
+    fri: 'fri',
+    friday: 'fri',
     sat: 'saturday'
   };
   return aliases[value] || value;

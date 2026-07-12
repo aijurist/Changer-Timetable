@@ -14,6 +14,7 @@ import {
 } from './validation.js';
 import { getRoomCapacity, isPreferredLabRoom } from './roomRules.js';
 import { labCsvHeaders, theoryCsvHeaders, toCsv, toLegacySession } from './legacyExport.js';
+import { normalizeDay } from './time.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -1154,7 +1155,7 @@ function mapSessionRow(row) {
     roomIsLab: row.room_is_lab,
     roomAllowConflicts: row.room_allow_conflicts,
     allowCapacityOverride: row.allow_capacity_override,
-    day: row.day,
+    day: normalizeDay(row.day),
     slotKey: row.slot_key,
     slotIndex: row.slot_index,
     sessionName: row.session_name,
@@ -1201,7 +1202,7 @@ function mapSessionListRow(row) {
     roomId: row.room_id,
     roomNumber: row.room_number,
     block: row.room_block,
-    day: row.day,
+    day: normalizeDay(row.day),
     slotKey: row.slot_key,
     slotIndex: row.slot_index,
     timeLabel: row.time_label,

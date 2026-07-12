@@ -678,8 +678,7 @@ function ScheduleGroup({ title, sessions, meta, onSelect, onAdd }) {
 
 function ScheduleTable({ sessions, meta, onSelect }) {
   const allDays = (meta?.days || []).map((day) => day.day);
-  const daysInData = new Set(sessions.map((session) => session.day));
-  const days = allDays.filter((day) => daysInData.has(day));
+  const days = getScheduleDisplayDays(sessions, allDays);
   const theorySlots = (meta?.theorySlots || []).map((slot) => ({ ...slot, scheduleType: 'theory' }));
   const labSlots = (meta?.labSessions || []).map((slot) => ({ ...slot, scheduleType: 'lab' }));
   const sessionIndex = new Map();
@@ -687,7 +686,7 @@ function ScheduleTable({ sessions, meta, onSelect }) {
 
   for (const session of sessions) {
     const slotKey = `${session.scheduleType}:${session.slotKey}`;
-    const cellKey = `${session.day}:${slotKey}`;
+    const cellKey = `${normalizeDayKey(session.day)}:${slotKey}`;
     usedSlotKeys.add(slotKey);
     if (!sessionIndex.has(cellKey)) sessionIndex.set(cellKey, []);
     sessionIndex.get(cellKey).push(session);
@@ -707,6 +706,10 @@ function ScheduleTable({ sessions, meta, onSelect }) {
   return (
     <div className="table-wrap">
       <table className="schedule-table">
+        <colgroup>
+          <col className="schedule-time-col" />
+          {days.map((day) => <col key={day} className="schedule-day-col" />)}
+        </colgroup>
         <thead>
           <tr>
             <th>Time</th>
@@ -726,7 +729,7 @@ function ScheduleTable({ sessions, meta, onSelect }) {
                     <span>{slot.slot_key}</span>
                   </td>
                   {days.map((day) => {
-                    const cellSessions = sessionIndex.get(`${day}:${slot.scheduleType}:${slot.slot_key}`) || [];
+                    const cellSessions = sessionIndex.get(`${normalizeDayKey(day)}:${slot.scheduleType}:${slot.slot_key}`) || [];
                     return (
                       <td key={`${day}-${slot.scheduleType}-${slot.slot_key}`}>
                         {cellSessions.map((session) => (
@@ -1372,6 +1375,65 @@ function getAllowedDays(meta, department) {
 
 function getAllowedSlots(meta, scheduleType) {
   return scheduleType === 'lab' ? meta?.labSessions || [] : meta?.theorySlots || [];
+}
+
+function getScheduleDisplayDays(rows, allDays) {
+  const orderedDays = allDays?.length ? allDays : ['monday', 'tuesday', 'wed', 'thur', 'fri', 'saturday'];
+  const patternDays = rows.map((session) => parseDayPattern(session.dayPattern, orderedDays)).find((days) => days.length === 5);
+  if (patternDays) return patternDays;
+
+  const daysInData = new Set(rows.map((session) => normalizeDayKey(session.day)).filter(Boolean));
+  if (orderedDays.length <= 5) return orderedDays;
+  if (daysInData.has('monday') && !daysInData.has('saturday')) return orderedDays.filter((day) => day !== 'saturday').slice(0, 5);
+  if (daysInData.has('saturday') && !daysInData.has('monday')) return orderedDays.filter((day) => day !== 'monday').slice(0, 5);
+  return orderedDays.filter((day) => day !== 'saturday').slice(0, 5);
+}
+
+function normalizeDayKey(day) {
+  const aliases = {
+    mon: 'monday',
+    monday: 'monday',
+    tue: 'tuesday',
+    tues: 'tuesday',
+    tuesday: 'tuesday',
+    wed: 'wed',
+    wednesday: 'wed',
+    thu: 'thur',
+    thur: 'thur',
+    thurs: 'thur',
+    thursday: 'thur',
+    fri: 'fri',
+    friday: 'fri',
+    sat: 'saturday',
+    saturday: 'saturday'
+  };
+  return aliases[String(day || '').trim().toLowerCase()] || day;
+}
+
+function parseDayPattern(pattern, orderedDays) {
+  const normalized = String(pattern || '').toLowerCase().replace(/\s+/g, '');
+  const dayAliases = {
+    monday: 'monday',
+    mon: 'monday',
+    tuesday: 'tuesday',
+    tue: 'tuesday',
+    wednesday: 'wed',
+    wed: 'wed',
+    thursday: 'thur',
+    thur: 'thur',
+    friday: 'fri',
+    fri: 'fri',
+    saturday: 'saturday',
+    sat: 'saturday'
+  };
+  const rangeMatch = normalized.match(/(monday|mon|tuesday|tue|wednesday|wed|thursday|thur|friday|fri|saturday|sat)-(monday|mon|tuesday|tue|wednesday|wed|thursday|thur|friday|fri|saturday|sat)/);
+  if (!rangeMatch) return [];
+  const start = dayAliases[rangeMatch[1]];
+  const end = dayAliases[rangeMatch[2]];
+  const startIndex = orderedDays.indexOf(start);
+  const endIndex = orderedDays.indexOf(end);
+  if (startIndex === -1 || endIndex === -1 || endIndex < startIndex) return [];
+  return orderedDays.slice(startIndex, endIndex + 1);
 }
 
 function findPolicy(meta, department) {
