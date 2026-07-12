@@ -743,12 +743,13 @@ input:focus,
 
 .session-block {
   width: 100%;
-  border: 1px solid transparent;
+  border: 1px solid #dbe4ea;
   text-align: center;
   margin: 2px 0;
   padding: 8px 18px 13px;
   min-height: 76px;
   border-radius: 4px;
+  background: #fff;
   color: var(--text-color);
   position: relative;
   display: flex;
@@ -761,7 +762,8 @@ input:focus,
 
 .session-block:hover {
   transform: scale(1.02);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  border-color: #b7d7ec;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.13);
   z-index: 5;
 }
 
@@ -800,13 +802,15 @@ input:focus,
   position: absolute;
   top: 4px;
   right: 4px;
-  padding: 2px 5px;
-  border-radius: 4px;
+  min-width: 24px;
+  padding: 3px 6px;
+  border-radius: 999px;
   background: #ff6b6b;
   color: #fff;
   font-weight: 700;
   font-size: 0.62rem !important;
   line-height: 1;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.18);
 }
 
 .group-g0-badge { background-color: #7aa12d; color: #fff; }
@@ -856,12 +860,12 @@ input:focus,
 }
 
 .lab-session {
-  background: var(--lab-color);
+  background: #fff;
   border-left: 4px solid var(--secondary-color);
 }
 
 .theory-session {
-  background: var(--theory-color);
+  background: #fff;
   border-left: 4px solid var(--success-color);
 }
 
@@ -869,16 +873,19 @@ input:focus,
   border-left-color: var(--warning-color);
 }
 
-.group-g0 { background-color: #a3cb38; }
-.group-g1 { background-color: #ff6b6b; color: #fff; }
-.group-g2 { background-color: #4ecdc4; }
-.group-g3 { background-color: #45b7d1; color: #fff; }
-.group-g4 { background-color: #f9ca24; }
-.group-g5 { background-color: #6c5ce7; color: #fff; }
-.group-g6 { background-color: #a0e7e5; }
-.group-g7 { background-color: #fd79a8; color: #fff; }
-.group-g8 { background-color: #fdcb6e; }
-.group-g9 { background-color: #e17055; color: #fff; }
+.session-block.group-g0,
+.session-block.group-g1,
+.session-block.group-g2,
+.session-block.group-g3,
+.session-block.group-g4,
+.session-block.group-g5,
+.session-block.group-g6,
+.session-block.group-g7,
+.session-block.group-g8,
+.session-block.group-g9 {
+  background: #fff;
+  color: var(--text-color);
+}
 
 .table-empty,
 .empty-card {
