@@ -304,6 +304,10 @@ function App() {
     setDraft((current) => ({ ...current, [key]: value }));
   }
 
+  function updateDraftBatch(mode) {
+    setDraft((current) => applyBatchMode(current, mode, null));
+  }
+
   async function saveDraft() {
     if (!draft) return;
     setSaving(true);
@@ -413,6 +417,9 @@ function App() {
         next.sessionType = scheduleType === 'lab' ? 'Practical' : 'Lecture';
         next.practicalHours = scheduleType === 'lab' ? (next.practicalHours || 2) : '';
         next.lectureHours = scheduleType === 'theory' ? (next.lectureHours || 1) : '';
+        if (scheduleType !== 'lab') {
+          Object.assign(next, applyBatchMode(next, 'none', ''));
+        }
       }
       if (key === 'department') {
         next.semester = '';
@@ -455,6 +462,10 @@ function App() {
       }
       return next;
     });
+  }
+
+  function updateCreateDraftBatch(mode) {
+    setCreateDraft((current) => applyBatchMode(current, mode, ''));
   }
 
   async function createSession() {
@@ -618,6 +629,7 @@ function App() {
           teachers={teachers}
           saving={saving}
           onChange={updateDraft}
+          onBatchChange={updateDraftBatch}
           onClose={closeEditor}
           onSave={saveDraft}
           onSwapRoom={swapSelectedRoom}
@@ -638,6 +650,7 @@ function App() {
           courses={createCourses}
           saving={saving}
           onChange={updateCreateDraft}
+          onBatchChange={updateCreateDraftBatch}
           onClose={closeCreateSession}
           onSave={createSession}
         />
@@ -813,7 +826,7 @@ function ActivityPanel({ activity }) {
   );
 }
 
-function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onClose, onSave, onSwapRoom, onDelete, days }) {
+function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onBatchChange, onClose, onSave, onSwapRoom, onDelete, days }) {
   const selectedRoom = rooms.find((room) => String(room.id) === String(draft.roomId));
   const canSwapRoom = selectedRoom &&
     !selectedRoom.isAvailable &&
@@ -908,7 +921,7 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
 
           {draft.scheduleType === 'lab' ? (
             <>
-              <label className="check-row"><input type="checkbox" checked={Boolean(draft.isBatched)} onChange={(event) => onChange('isBatched', event.target.checked)} /><span>Batched lab</span></label>
+              <LabBatchPicker draft={draft} onChange={onBatchChange} />
               <div className="form-grid">
                 <label>Batches<input type="number" min="1" value={draft.numBatches ?? ''} onChange={(event) => onChange('numBatches', toOptionalNumber(event.target.value))} /></label>
                 <label>Practical Hours<input type="number" min="0" step="0.5" value={draft.practicalHours ?? ''} onChange={(event) => onChange('practicalHours', toOptionalNumber(event.target.value))} /></label>
@@ -941,7 +954,7 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
   );
 }
 
-function AddSessionModal({ draft, slots, rooms, teachers, days, departments, semesters, courses, saving, onChange, onClose, onSave }) {
+function AddSessionModal({ draft, slots, rooms, teachers, days, departments, semesters, courses, saving, onChange, onBatchChange, onClose, onSave }) {
   const canSave = draft.courseCode.trim() &&
     draft.courseName.trim() &&
     draft.department.trim() &&
@@ -1065,7 +1078,7 @@ function AddSessionModal({ draft, slots, rooms, teachers, days, departments, sem
 
           {draft.scheduleType === 'lab' ? (
             <>
-              <label className="check-row"><input type="checkbox" checked={Boolean(draft.isBatched)} onChange={(event) => onChange('isBatched', event.target.checked)} /><span>Batched lab</span></label>
+              <LabBatchPicker draft={draft} onChange={onBatchChange} />
               <div className="form-grid">
                 <label>Batches<input type="number" min="1" value={draft.numBatches} onChange={(event) => onChange('numBatches', event.target.value)} /></label>
                 <label>Practical Hours<input type="number" min="0" step="0.5" value={draft.practicalHours} onChange={(event) => onChange('practicalHours', event.target.value)} /></label>
@@ -1093,6 +1106,36 @@ function AddSessionModal({ draft, slots, rooms, teachers, days, departments, sem
         </footer>
       </section>
     </div>
+  );
+}
+
+function LabBatchPicker({ draft, onChange }) {
+  const activeMode = getBatchMode(draft);
+  const options = [
+    ['none', 'No-Batch'],
+    ['batch1', 'Batch 1'],
+    ['batch2', 'Batch 2']
+  ];
+
+  return (
+    <section className="lab-batch-control" aria-label="Lab batch">
+      <div>
+        <span>Lab batch</span>
+        <strong>{formatBatchLabel(draft)}</strong>
+      </div>
+      <div className="batch-button-row">
+        {options.map(([mode, label]) => (
+          <button
+            key={mode}
+            type="button"
+            className={activeMode === mode ? 'active' : ''}
+            onClick={() => onChange(mode)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -1422,6 +1465,40 @@ function getGroupClass(groupName) {
 
 function titleCase(value) {
   return String(value || '').charAt(0).toUpperCase() + String(value || '').slice(1);
+}
+
+function getBatchMode(session) {
+  if (!session?.isBatched) return 'none';
+  const label = String(session.batchLabel || session.batchInfo || '').toLowerCase();
+  const number = Number(session.batchNumber);
+  if (number === 1 || label.includes('batch 1')) return 'batch1';
+  if (number === 2 || label.includes('batch 2')) return 'batch2';
+  return 'none';
+}
+
+function applyBatchMode(current, mode, emptyValue = null) {
+  if (!current) return current;
+  if (mode === 'batch1' || mode === 'batch2') {
+    const batchNumber = mode === 'batch1' ? 1 : 2;
+    const batchLabel = `Batch ${batchNumber}`;
+    return {
+      ...current,
+      isBatched: true,
+      batchInfo: batchLabel,
+      numBatches: current.numBatches || 2,
+      batchNumber,
+      batchLabel
+    };
+  }
+
+  return {
+    ...current,
+    isBatched: false,
+    batchInfo: emptyValue,
+    numBatches: emptyValue,
+    batchNumber: emptyValue,
+    batchLabel: emptyValue
+  };
 }
 
 function formatBatchLabel(session) {

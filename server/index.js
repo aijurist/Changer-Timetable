@@ -458,9 +458,12 @@ app.post('/api/sessions', async (req, res, next) => {
         source_file: 'manual',
         course_instance_id: null,
         course_code: payload.courseCode,
-        course_code_display: payload.scheduleType === 'lab' && payload.batchInfo
-          ? `${payload.courseCode} ${payload.batchInfo}`
-          : payload.courseCode,
+        course_code_display: formatCourseCodeDisplay(payload.scheduleType, payload.courseCode, {
+          is_batched: payload.isBatched ?? false,
+          batch_info: payload.batchInfo ?? null,
+          batch_label: payload.batchLabel ?? null,
+          batch_number: payload.batchNumber ?? null
+        }),
         course_name: payload.courseName,
         session_type: payload.sessionType || (payload.scheduleType === 'lab' ? 'Practical' : 'Lecture'),
         session_number: payload.sessionNumber ?? null,
@@ -732,11 +735,7 @@ app.patch('/api/sessions/:id', async (req, res, next) => {
         course_code_display: payload.courseCodeDisplay !== undefined ? payload.courseCodeDisplay : current.course_code_display
       };
 
-      if (nextSession.schedule_type === 'lab' && nextSession.is_batched && nextSession.batch_info) {
-        nextSession.course_code_display = `${nextSession.course_code} ${nextSession.batch_info}`;
-      } else if (nextSession.schedule_type === 'lab' && !nextSession.course_code_display) {
-        nextSession.course_code_display = nextSession.course_code;
-      }
+      nextSession.course_code_display = formatCourseCodeDisplay(nextSession.schedule_type, nextSession.course_code, nextSession);
 
       await lockResources(client, buildResourceKeys(current, nextSession));
 
@@ -1285,6 +1284,13 @@ function mapRoomRow(row) {
 function parseGroupIndex(groupName) {
   const match = String(groupName || '').match(/_G(\d+)$/);
   return match ? Number(match[1]) : null;
+}
+
+function formatCourseCodeDisplay(scheduleType, courseCode, session = {}) {
+  if (scheduleType !== 'lab' || !session.is_batched) return courseCode;
+  const batchText = [session.batch_label, session.batch_info].find((value) => String(value || '').trim())
+    || (session.batch_number ? `Batch ${session.batch_number}` : null);
+  return batchText ? `${courseCode} ${batchText}` : courseCode;
 }
 
 async function getConflictSummary(client = pool) {
