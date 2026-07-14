@@ -29,6 +29,7 @@ const viewOptions = [
 ];
 
 function App() {
+  const [showConflicts, setShowConflicts] = useState(false);
   const {
     page,
     setPage,
@@ -76,9 +77,9 @@ function App() {
   } = useChangerStore();
 
   async function loadMeta() {
-    const metaResult = await api.meta();
+    const [metaResult, conflictResult] = await Promise.all([api.meta(), api.conflicts()]);
     setMeta(metaResult);
-    setConflicts({ summary: metaResult.conflicts, rows: [] });
+    setConflicts(conflictResult);
   }
 
   async function loadSessions(nextFilters = filters) {
@@ -143,7 +144,7 @@ function App() {
       day: draft.day,
       scheduleType: draft.scheduleType,
       slotKey: draft.slotKey,
-      excludeSessionId: draft.id
+      excludeSessionIds: [draft.id, draft.pairedSessionId].filter(Boolean).join(',')
     };
     Promise.all([api.rooms(params), api.teachers(params)])
       .then(([roomRows, teacherRows]) => {
@@ -151,7 +152,7 @@ function App() {
         setTeachers(teacherRows);
       })
       .catch((error) => setNotice({ type: 'error', text: error.message }));
-  }, [draft?.day, draft?.slotKey, draft?.scheduleType, draft?.id]);
+  }, [draft?.day, draft?.slotKey, draft?.scheduleType, draft?.id, draft?.pairedSessionId]);
 
   useEffect(() => {
     if (!createDraft) return;
@@ -189,7 +190,9 @@ function App() {
         (!filters.day || session.day === filters.day) &&
         (!filters.department || session.department === filters.department) &&
         (!filters.semester || String(session.semester) === filters.semester) &&
-        (!filters.group || session.groupName === filters.group) &&
+        (String(filters.semester) === '3'
+          ? (!filters.section || String(session.sectionIndex) === filters.section)
+          : (!filters.group || session.groupName === filters.group)) &&
         (!filters.dayPattern || session.dayPattern === filters.dayPattern) &&
         (!courseNeedle || courseText.includes(courseNeedle)) &&
         (!teacherNeedle || teacherText.includes(teacherNeedle)) &&
@@ -202,6 +205,7 @@ function App() {
     filters.department,
     filters.semester,
     filters.group,
+    filters.section,
     filters.dayPattern,
     filters.course,
     filters.teacher,
@@ -227,7 +231,17 @@ function App() {
     };
   }, [sessions]);
 
-  const groupedSessions = useMemo(() => groupSessions(displayedSessions, viewType), [displayedSessions, viewType]);
+  const isSectionMode = filters.semester === '3';
+  const sectionOptions = useMemo(
+    () => getSectionsForDepartment(sessions, filters.department),
+    [sessions, filters.department]
+  );
+  const groupedSessions = useMemo(
+    () => isSectionMode && filters.department
+      ? groupSessionsBySection(displayedSessions)
+      : groupSessions(displayedSessions, viewType),
+    [displayedSessions, viewType, isSectionMode, filters.department]
+  );
   const hasFilters = useMemo(() => Object.values(filters).some(Boolean), [filters]);
   const slots = draft?.scheduleType === 'lab' ? meta?.labSessions || [] : meta?.theorySlots || [];
   const createCourses = useMemo(
@@ -248,6 +262,10 @@ function App() {
   );
 
   async function selectSession(session) {
+    if (Number(session.semester) === 3 && session.sectionIndex !== null && session.sectionIndex !== undefined && !filters.section) {
+      setNotice({ type: 'error', text: 'Select a specific section before editing its sessions.' });
+      return;
+    }
     setNotice(null);
     setSelected(session);
     setDraft(toDraft(session));
@@ -334,10 +352,13 @@ function App() {
         rowVersion: draft.rowVersion,
         updatedBy: draft.updatedBy || 'staff'
       });
+      const movedPair = Boolean(result.pairedSessionId);
       closeEditor();
       setNotice({
         type: 'success',
-        text: result.warnings?.length ? `Saved with ${result.warnings.length} warning(s).` : 'Session updated successfully.'
+        text: result.warnings?.length
+          ? `Saved with ${result.warnings.length} warning(s).`
+          : movedPair ? 'Paired 25 + 25 session moved successfully.' : 'Session updated successfully.'
       });
       await refreshAll(filters);
     } catch (error) {
@@ -588,7 +609,19 @@ function App() {
                 <Field label="Day"><Select value={filters.day} onChange={(value) => updateFilter('day', value)} options={[['', 'All Days'], ...(meta?.days || []).map((day) => [day.day, titleCase(day.day)])]} /></Field>
                 <Field label="Type"><Select value={filters.type} onChange={(value) => updateFilter('type', value)} options={[['', 'All Types'], ['theory', 'Theory Only'], ['lab', 'Lab Only']]} /></Field>
                 <Field label="Day Pattern"><Select value={filters.dayPattern} onChange={(value) => updateFilter('dayPattern', value)} options={[['', 'All Patterns'], ...filterValues.dayPatterns.map((value) => [value, value])]} /></Field>
-                <Field label="Group"><Select value={filters.group} onChange={(value) => updateFilter('group', value)} options={[['', 'All Groups'], ...filterValues.groups.map((value) => [value, value])]} /></Field>
+                {isSectionMode ? (
+                  <Field label="Section">
+                    <Select
+                      value={filters.section}
+                      onChange={(value) => updateFilter('section', value)}
+                      options={filters.department
+                        ? [['', 'All Sections'], ...sectionOptions.map((section) => [String(section.index), `Section ${section.label}`])]
+                        : [['', 'Select department first']]}
+                    />
+                  </Field>
+                ) : (
+                  <Field label="Group"><Select value={filters.group} onChange={(value) => updateFilter('group', value)} options={[['', 'All Groups'], ...filterValues.groups.map((value) => [value, value])]} /></Field>
+                )}
                 <Field label="Search Course"><SearchInput value={filters.course} onChange={(value) => updateFilter('course', value)} placeholder="Course code/name" /></Field>
                 <Field label="Search Teacher"><SearchInput value={filters.teacher} onChange={(value) => updateFilter('teacher', value)} placeholder="Staff name/code" /></Field>
                 <Field label="Search Room"><SearchInput value={filters.room} onChange={(value) => updateFilter('room', value)} placeholder="Room/block" /></Field>
@@ -599,8 +632,40 @@ function App() {
               <strong><AlertTriangle size={16} /> Conflicts</strong>
               <span>Teacher {conflicts?.summary?.teacher || 0}</span>
               <span>Room {conflicts?.summary?.room || 0}</span>
+              <span>Section {conflicts?.summary?.section || 0}</span>
               <span>Capacity {conflicts?.summary?.capacity || 0}</span>
+              <button
+                type="button"
+                className="conflict-details-toggle"
+                onClick={() => setShowConflicts((current) => !current)}
+                disabled={!conflicts?.summary?.total}
+              >
+                {showConflicts ? 'Hide details' : 'View details'}
+              </button>
             </section>
+
+            {showConflicts && conflicts?.rows?.length > 0 && (
+              <section className="conflict-details" aria-label="Timetable conflict details">
+                <header>
+                  <strong>Conflict details</strong>
+                  <span>Showing {conflicts.rows.length} of {conflicts.summary.total}</span>
+                </header>
+                <div className="conflict-list">
+                  {conflicts.rows.map((conflict, index) => (
+                    <div className="conflict-item" key={`${conflict.type}-${conflict.session_a_id}-${conflict.session_b_id || index}`}>
+                      <AlertTriangle size={15} />
+                      <div>
+                        <strong>{formatConflictType(conflict.type)}: {conflict.label}</strong>
+                        <span>{conflict.course_a}{conflict.course_b ? ` and ${conflict.course_b}` : ''} · {titleCase(conflict.day)} · {conflict.time_a}</span>
+                        {(conflict.department_a || conflict.department_b) && (
+                          <small>{[conflict.department_a, conflict.department_b].filter(Boolean).join(' / ')}{conflict.bypassed ? ' · imported with room override' : ''}</small>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
 
             <section className="schedule-groups">
               {groupedSessions.length === 0 ? (
@@ -732,8 +797,10 @@ function ScheduleTable({ sessions, meta, onSelect }) {
                     const cellSessions = sessionIndex.get(`${normalizeDayKey(day)}:${slot.scheduleType}:${slot.slot_key}`) || [];
                     return (
                       <td key={`${day}-${slot.scheduleType}-${slot.slot_key}`}>
-                        {cellSessions.map((session) => (
-                          <SessionBlock key={session.id} session={session} onSelect={onSelect} />
+                        {groupCellSessions(cellSessions).map((block) => block.sessions.length > 1 ? (
+                          <PairedSessionBlock key={block.key} sessions={block.sessions} onSelect={onSelect} />
+                        ) : (
+                          <SessionBlock key={block.key} session={block.sessions[0]} onSelect={onSelect} />
                         ))}
                       </td>
                     );
@@ -751,6 +818,7 @@ function ScheduleTable({ sessions, meta, onSelect }) {
 function SessionBlock({ session, onSelect }) {
   const groupClass = getGroupClass(session.groupName);
   const batchText = formatBatchLabel(session);
+  const isSection = Number(session.semester) === 3 && session.sectionLabel;
   const className = [
     'session-block',
     session.scheduleType === 'lab' ? 'lab-session' : 'theory-session',
@@ -760,15 +828,57 @@ function SessionBlock({ session, onSelect }) {
 
   return (
     <button className={`${className} editable-session`} onClick={() => onSelect(session)} title="Edit session">
-      {session.groupName && <span className={`group-number ${groupClass}-badge`}>{shortGroup(session.groupName)}</span>}
+      {isSection ? (
+        <span className="section-number" title={`Section ${session.sectionLabel}`}>{session.sectionLabel}</span>
+      ) : session.groupName && (
+        <span className={`group-number ${groupClass}-badge`}>{shortGroup(session.groupName)}</span>
+      )}
       <span className="session-teacher">{session.teacherName || '-'}</span>
       <strong className="session-code">{session.courseCode}</strong>
       <span className="session-course">{session.courseName || '-'}</span>
       <span className="session-room">{session.roomNumber || '-'}</span>
       {session.scheduleType === 'lab' && <span className="session-batch">{batchText}</span>}
+      {session.roomConflictOverride && <AlertTriangle className="session-conflict-marker" size={14} aria-label="Room conflict override" />}
       <small className="session-instance">{session.courseInstanceId || session.id}</small>
     </button>
   );
+}
+
+function PairedSessionBlock({ sessions, onSelect }) {
+  const [first, second] = [...sessions].sort((left, right) =>
+    String(left.courseCode || '').localeCompare(String(right.courseCode || ''))
+  );
+  const sectionLabel = first.sectionLabel || second.sectionLabel;
+  const hasRoomConflict = sessions.some((session) => session.roomConflictOverride);
+  return (
+    <div className="paired-session-block" aria-label={`Section ${sectionLabel} paired 25 plus 25 session`}>
+      <span className="paired-mode">25 + 25</span>
+      <span className="section-number" title={`Section ${sectionLabel}`}>{sectionLabel}</span>
+      {[first, second].map((session) => (
+        <button
+          key={session.id}
+          type="button"
+          className="paired-session-half"
+          onClick={() => onSelect(session)}
+          title={`Edit ${session.teacherName || session.courseCode}`}
+        >
+          <strong>{session.courseCode}</strong>
+          <span>{session.courseName || '-'}</span>
+          <small>{session.teacherName || '-'}</small>
+        </button>
+      ))}
+      <span className="paired-room">{first.roomNumber || second.roomNumber || '-'}</span>
+      {hasRoomConflict && <AlertTriangle className="session-conflict-marker" size={14} aria-label="Room conflict override" />}
+    </div>
+  );
+}
+
+function formatConflictType(type) {
+  if (type === 'room_conflict') return 'Room clash';
+  if (type === 'teacher_conflict') return 'Teacher clash';
+  if (type === 'section_conflict') return 'Section clash';
+  if (type === 'capacity_violation') return 'Capacity issue';
+  return 'Conflict';
 }
 
 function LogsPage({ activity, lastLoadedAt, onRefresh, refreshing }) {
@@ -831,7 +941,14 @@ function ActivityPanel({ activity }) {
 
 function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onBatchChange, onClose, onSave, onSwapRoom, onDelete, days }) {
   const selectedRoom = rooms.find((room) => String(room.id) === String(draft.roomId));
+  const pairedSession = draft.pairedSession;
+  const movesPair = Boolean(pairedSession) && (
+    draft.day !== selected.day ||
+    draft.slotKey !== selected.slotKey ||
+    String(draft.roomId) !== String(selected.roomId)
+  );
   const canSwapRoom = selectedRoom &&
+    !pairedSession &&
     !selectedRoom.isAvailable &&
     selectedRoom.occupyingSessionId &&
     String(selectedRoom.occupyingSessionId) !== String(draft.id) &&
@@ -850,10 +967,28 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
 
         <div className="modal-body">
           <div className="detail-grid">
-            <Detail label="Group" value={selected.groupName || '-'} />
+            <Detail
+              label={Number(selected.semester) === 3 && selected.sectionLabel ? 'Section' : 'Group'}
+              value={Number(selected.semester) === 3 && selected.sectionLabel ? `Section ${selected.sectionLabel}` : selected.groupName || '-'}
+            />
             <Detail label="Department" value={`${selected.department || '-'} S${selected.semester || '-'}`} />
             <Detail label="Version" value={draft.rowVersion} />
           </div>
+
+          {pairedSession && (
+            <section className="paired-edit-panel">
+              <div className="paired-edit-heading">
+                <span>25 + 25 paired session</span>
+                <strong>{movesPair ? 'Both halves will move' : 'Shared time and room'}</strong>
+              </div>
+              <div className="paired-edit-staff">
+                <span><strong>{selected.courseCode}</strong>{selected.teacherName || 'Staff TBA'}</span>
+                <ArrowLeftRight size={16} />
+                <span><strong>{pairedSession.courseCode}</strong>{pairedSession.teacherName || 'Staff TBA'}</span>
+              </div>
+              <small>Day, time, and room are updated for both staff together. Changing Staff updates only the selected half.</small>
+            </section>
+          )}
 
           <div className="form-grid">
             <label>Day<SelectNative value={draft.day} onChange={(value) => onChange('day', value)} days={days} /></label>
@@ -950,7 +1085,7 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
           <button className="danger-action" onClick={onDelete} disabled={saving}><Trash2 size={17} /> Delete</button>
           <span className="modal-spacer" />
           <button className="secondary-action" onClick={onClose}>Cancel</button>
-          <button className="primary-action" onClick={onSave} disabled={saving}>{saving ? <Clock size={17} /> : <Save size={17} />} {saving ? 'Saving' : 'Save Changes'}</button>
+          <button className="primary-action" onClick={onSave} disabled={saving}>{saving ? <Clock size={17} /> : <Save size={17} />} {saving ? 'Saving' : movesPair ? 'Move Paired Session' : 'Save Changes'}</button>
         </footer>
       </section>
     </div>
@@ -1345,6 +1480,69 @@ function groupSessions(rows, viewType) {
   return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
 }
 
+function groupSessionsBySection(rows) {
+  const sections = new Map();
+  for (const session of rows) {
+    const index = session.sectionIndex;
+    const label = session.sectionLabel || 'Unassigned';
+    const key = index === null || index === undefined ? 'unassigned' : String(index);
+    if (!sections.has(key)) sections.set(key, { index, label, rows: [] });
+    sections.get(key).rows.push(session);
+  }
+  return [...sections.values()]
+    .sort((left, right) => {
+      if (left.index === null || left.index === undefined) return 1;
+      if (right.index === null || right.index === undefined) return -1;
+      return Number(left.index) - Number(right.index);
+    })
+    .map((section) => [`Section ${section.label}`, section.rows]);
+}
+
+function getSectionsForDepartment(rows, department) {
+  if (!department) return [];
+  const sections = new Map();
+  for (const session of rows) {
+    if (session.department !== department || Number(session.semester) !== 3) continue;
+    if (session.sectionIndex === null || session.sectionIndex === undefined) continue;
+    sections.set(Number(session.sectionIndex), session.sectionLabel || String(session.sectionIndex + 1));
+  }
+  return [...sections.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([index, label]) => ({ index, label }));
+}
+
+function groupCellSessions(sessions) {
+  const blocks = [];
+  const used = new Set();
+  for (const session of sessions) {
+    if (used.has(session.id)) continue;
+    const partner = isPairedSectionSession(session)
+      ? sessions.find((candidate) =>
+          !used.has(candidate.id) &&
+          candidate.id !== session.id &&
+          candidate.sourceCourseInstanceId === session.partnerCourseInstanceId &&
+          candidate.partnerCourseInstanceId === session.sourceCourseInstanceId &&
+          candidate.sectionIndex === session.sectionIndex
+        )
+      : null;
+    const pairedSessions = partner ? [session, partner] : [session];
+    pairedSessions.forEach((entry) => used.add(entry.id));
+    blocks.push({
+      key: pairedSessions.map((entry) => entry.id).sort((a, b) => Number(a) - Number(b)).join(':'),
+      sessions: pairedSessions
+    });
+  }
+  return blocks;
+}
+
+function isPairedSectionSession(session) {
+  return Number(session?.semester) === 3 &&
+    Boolean(session?.isCoScheduled) &&
+    Boolean(session?.sectionLabel) &&
+    Boolean(session?.sourceCourseInstanceId) &&
+    Boolean(session?.partnerCourseInstanceId);
+}
+
 function getGroupKey(session, viewType) {
   if (viewType === 'semester') return `Semester ${session.semester || 'Unknown'}`;
   if (viewType === 'room') return session.roomNumber || 'Unassigned Room';
@@ -1602,6 +1800,8 @@ function formatRelativeTime(value) {
 function toDraft(session) {
   return {
     id: session.id,
+    pairedSessionId: session.pairedSession?.id || null,
+    pairedSession: session.pairedSession || null,
     scheduleType: session.scheduleType,
     day: session.day,
     slotKey: session.slotKey,

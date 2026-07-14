@@ -483,6 +483,77 @@ input:focus,
   font-size: 0.85rem;
 }
 
+.conflict-details-toggle {
+  margin-left: auto;
+  border: 1px solid #fdba74;
+  border-radius: 6px;
+  background: #fff;
+  color: #8a3d05;
+  padding: 5px 9px;
+  cursor: pointer;
+}
+
+.conflict-details-toggle:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.conflict-details {
+  margin: -8px 0 16px;
+  border: 1px solid #fed7aa;
+  background: #fff;
+}
+
+.conflict-details > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #ffedd5;
+}
+
+.conflict-details > header span,
+.conflict-item small {
+  color: #7c5b43;
+  font-size: 0.78rem;
+}
+
+.conflict-list {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.conflict-item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid #f3f4f6;
+  color: #9a3412;
+}
+
+.conflict-item:last-child {
+  border-bottom: 0;
+}
+
+.conflict-item > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.conflict-item span,
+.conflict-item small {
+  overflow-wrap: anywhere;
+}
+
+.session-conflict-marker {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  color: #c2410c;
+}
+
 .schedule-groups {
   display: grid;
   gap: 18px;
@@ -813,6 +884,89 @@ input:focus,
   box-shadow: 0 1px 4px rgba(15, 23, 42, 0.18);
 }
 
+.section-number {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 2;
+  min-width: 23px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: #fff;
+  background: #17659b;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.18);
+  font-size: 0.62rem !important;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.paired-session-block {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  min-height: 110px;
+  margin: 2px 0;
+  border: 1px solid #cbd9e3;
+  border-left: 4px solid #238b62;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.paired-mode {
+  position: absolute;
+  top: 5px;
+  left: 6px;
+  color: #287255;
+  font-size: 0.56rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.paired-session-half {
+  display: grid;
+  width: 100%;
+  min-height: 43px;
+  gap: 1px;
+  padding: 5px 30px 5px 7px;
+  border: 0;
+  border-bottom: 1px solid #d9e2e8;
+  color: var(--text-color);
+  background: #fff;
+  text-align: center;
+}
+
+.paired-session-half:first-of-type {
+  padding-top: 19px;
+}
+
+.paired-session-half:hover,
+.paired-session-half:focus-visible {
+  outline: none;
+  background: #f0f8fd;
+}
+
+.paired-session-half strong {
+  font-size: 0.72rem;
+}
+
+.paired-session-half span,
+.paired-session-half small {
+  overflow: hidden;
+  color: #65717d;
+  font-size: 0.61rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.paired-room {
+  display: block;
+  padding: 3px 5px;
+  color: #425260;
+  background: #f7fafc;
+  font-size: 0.62rem;
+  text-align: center;
+}
+
 .group-g0-badge { background-color: #7aa12d; color: #fff; }
 .group-g1-badge { background-color: #ff6b6b; color: #fff; }
 .group-g2-badge { background-color: #28d8cf; color: #fff; }
@@ -959,6 +1113,56 @@ input:focus,
   color: #084298;
   font-size: 0.88rem;
   margin-bottom: 12px;
+}
+
+.paired-edit-panel {
+  display: grid;
+  gap: 9px;
+  margin: 12px 0;
+  padding: 11px 12px;
+  border: 1px solid #9fd4c0;
+  border-radius: 7px;
+  color: #174f3a;
+  background: #edf9f4;
+}
+
+.paired-edit-heading,
+.paired-edit-staff {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.paired-edit-heading span {
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.paired-edit-heading strong {
+  color: #236b50;
+  font-size: 0.8rem;
+}
+
+.paired-edit-staff > span {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  padding: 7px 9px;
+  border: 1px solid #c6e7da;
+  border-radius: 5px;
+  background: #fff;
+  font-size: 0.78rem;
+}
+
+.paired-edit-staff > span:last-child {
+  text-align: right;
+}
+
+.paired-edit-panel small {
+  color: #3d6f5c;
+  line-height: 1.35;
 }
 
 .detail-grid,

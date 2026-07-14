@@ -14,6 +14,14 @@ import {
 } from './validation.js';
 import { getRoomCapacity, isPreferredLabRoom } from './roomRules.js';
 import { labCsvHeaders, theoryCsvHeaders, toCsv, toLegacySession } from './legacyExport.js';
+import {
+  getPartnerCourseInstanceKey,
+  getSectionIndex,
+  getSectionKey,
+  getSectionLabel,
+  getSourceCourseInstanceKey,
+  isPairedSectionSession
+} from './section.js';
 import { normalizeDay } from './time.js';
 
 const app = express();
@@ -107,6 +115,22 @@ function positiveId(value, label = 'id') {
     throw new HttpError(400, `Invalid ${label}`);
   }
   return parsed;
+}
+
+function idList(value) {
+  const rawValues = Array.isArray(value) ? value : String(value || '').split(',');
+  const ids = rawValues.map(Number).filter((id) => Number.isInteger(id) && id > 0);
+  return ids.length ? [...new Set(ids)] : [0];
+}
+
+function dedupeValidationItems(items) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = `${item.type || ''}:${item.session?.id || ''}:${item.message || ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 app.get('/api/health', async (_req, res, next) => {
@@ -232,7 +256,12 @@ app.get('/api/sessions/:id', async (req, res, next) => {
     const sessionId = positiveId(req.params.id, 'session id');
     const result = await pool.query(`${sessionSelectSql()} WHERE s.id = $1`, [sessionId]);
     if (!result.rowCount) throw new HttpError(404, 'Session not found');
-    res.json(mapSessionRow(result.rows[0]));
+    const session = mapSessionRow(result.rows[0]);
+    const pairedRow = await findPairedOccurrence(pool, result.rows[0]);
+    res.json({
+      ...session,
+      pairedSession: pairedRow ? mapSessionRow(pairedRow) : null
+    });
   } catch (error) {
     next(error);
   }
@@ -242,7 +271,7 @@ app.get('/api/rooms', async (req, res, next) => {
   try {
     const slot = await resolveRequestedSlot(req.query.scheduleType, req.query.slotKey);
     const day = req.query.day;
-    const excludeId = boundedInt(req.query.excludeSessionId, 0, 0, 1000000);
+    const excludeIds = idList(req.query.excludeSessionIds || req.query.excludeSessionId);
 
     const result = await pool.query(
       `SELECT r.*,
@@ -258,7 +287,7 @@ app.get('/api/rooms', async (req, res, next) => {
             SELECT 1
             FROM sessions s
             WHERE s.status = 'active'
-              AND s.id <> $5
+              AND NOT (s.id = ANY($5::bigint[]))
               AND s.room_id = r.id
               AND s.day = $1
               AND s.allow_room_conflicts = false
@@ -273,7 +302,7 @@ app.get('/api/rooms', async (req, res, next) => {
          WHERE $1::text IS NOT NULL
            AND $2::int IS NOT NULL
            AND s.status = 'active'
-           AND s.id <> $5
+           AND NOT (s.id = ANY($5::bigint[]))
            AND s.room_id = r.id
            AND s.day = $1
            AND s.allow_room_conflicts = false
@@ -292,7 +321,7 @@ app.get('/api/rooms', async (req, res, next) => {
         slot?.start_minute || null,
         slot?.end_minute || null,
         req.query.q ? `%${req.query.q}%` : null,
-        excludeId,
+        excludeIds,
         req.query.scheduleType || null
       ]
     );
@@ -307,7 +336,7 @@ app.get('/api/teachers', async (req, res, next) => {
   try {
     const slot = await resolveRequestedSlot(req.query.scheduleType, req.query.slotKey);
     const day = req.query.day;
-    const excludeId = boundedInt(req.query.excludeSessionId, 0, 0, 1000000);
+    const excludeIds = idList(req.query.excludeSessionIds || req.query.excludeSessionId);
     const q = req.query.q ? `%${req.query.q}%` : null;
 
     const result = await pool.query(
@@ -318,7 +347,7 @@ app.get('/api/teachers', async (req, res, next) => {
             SELECT 1
             FROM sessions s
             WHERE s.status = 'active'
-              AND s.id <> $5
+              AND NOT (s.id = ANY($5::bigint[]))
               AND s.teacher_id = t.id
               AND s.day = $1
               AND int4range(s.start_minute, s.end_minute, '[)') && int4range($2, $3, '[)')
@@ -328,7 +357,7 @@ app.get('/api/teachers', async (req, res, next) => {
        WHERE ($4::text IS NULL OR t.name ILIKE $4 OR t.staff_code ILIKE $4)
        ORDER BY is_available DESC, t.name
        LIMIT 800`,
-      [day || null, slot?.start_minute || null, slot?.end_minute || null, q, excludeId]
+      [day || null, slot?.start_minute || null, slot?.end_minute || null, q, excludeIds]
     );
 
     res.json(result.rows.map((row) => ({
@@ -686,9 +715,30 @@ app.patch('/api/sessions/:id', async (req, res, next) => {
       );
       const requestId = request.rows[0].id;
 
-      const currentResult = await client.query('SELECT * FROM sessions WHERE id = $1 FOR UPDATE', [sessionId]);
-      if (!currentResult.rowCount) throw new HttpError(404, 'Session not found');
-      const current = currentResult.rows[0];
+      const currentLookup = await client.query('SELECT * FROM sessions WHERE id = $1', [sessionId]);
+      if (!currentLookup.rowCount) throw new HttpError(404, 'Session not found');
+      const pairLookup = await findPairedOccurrence(client, currentLookup.rows[0]);
+      if (isPairedSectionSession(currentLookup.rows[0]) && !pairLookup) {
+        const details = { sessionId, partnerCourseInstanceId: getPartnerCourseInstanceKey(currentLookup.rows[0]) };
+        await rejectEdit(client, requestId, 'paired_session_missing', details);
+        return {
+          status: 409,
+          body: {
+            success: false,
+            message: 'The paired 25 + 25 session could not be found. Refresh the timetable before editing.',
+            details
+          }
+        };
+      }
+      const lockedRows = await client.query(
+        `SELECT * FROM sessions WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE`,
+        [[sessionId, pairLookup?.id].filter(Boolean)]
+      );
+      const current = lockedRows.rows.find((row) => Number(row.id) === sessionId);
+      const paired = pairLookup
+        ? lockedRows.rows.find((row) => Number(row.id) === Number(pairLookup.id)) || null
+        : null;
+      if (!current) throw new HttpError(404, 'Session not found');
 
       if (payload.rowVersion && payload.rowVersion !== current.row_version) {
         const details = { currentVersion: current.row_version };
@@ -710,7 +760,7 @@ app.patch('/api/sessions/:id', async (req, res, next) => {
 
       const nextSession = {
         ...current,
-        day: payload.day ?? current.day,
+        day: normalizeDay(payload.day ?? current.day),
         slot_key: slot.slot_key,
         slot_index: slot.slot_index,
         session_name: current.schedule_type === 'lab' ? slot.slot_key : null,
@@ -738,12 +788,44 @@ app.patch('/api/sessions/:id', async (req, res, next) => {
 
       nextSession.course_code_display = formatCourseCodeDisplay(nextSession.schedule_type, nextSession.course_code, nextSession);
 
-      await lockResources(client, buildResourceKeys(current, nextSession));
+      const movesPair = Boolean(paired) && (
+        nextSession.day !== paired.day ||
+        nextSession.slot_key !== paired.slot_key ||
+        nextSession.room_id !== paired.room_id
+      );
+      const pairedNextSession = paired
+        ? {
+            ...paired,
+            day: nextSession.day,
+            slot_key: nextSession.slot_key,
+            slot_index: nextSession.slot_index,
+            session_name: paired.schedule_type === 'lab' ? nextSession.slot_key : null,
+            time_label: nextSession.time_label,
+            start_minute: nextSession.start_minute,
+            end_minute: nextSession.end_minute,
+            room_id: nextSession.room_id,
+            capacity: nextSession.capacity,
+            allow_room_conflicts: nextSession.allow_room_conflicts
+          }
+        : null;
+      const movingIds = [sessionId, paired?.id].filter(Boolean);
+      const resourceKeys = [
+        ...buildResourceKeys(current, nextSession),
+        ...(pairedNextSession ? buildResourceKeys(paired, pairedNextSession) : [])
+      ];
+      await lockResources(client, [...new Set(resourceKeys)].sort());
 
       const policy = await findDepartmentPolicy(client, nextSession.department);
       const dayError = validateDepartmentDay(policy, nextSession.day);
-      const validation = await findSessionConflicts(client, nextSession, sessionId);
+      const validation = await findSessionConflicts(client, nextSession, movingIds);
+      if (movesPair) {
+        const pairedValidation = await findSessionConflicts(client, pairedNextSession, movingIds);
+        validation.conflicts.push(...pairedValidation.conflicts);
+        validation.warnings.push(...pairedValidation.warnings);
+      }
       if (dayError) validation.conflicts.unshift(dayError);
+      validation.conflicts = dedupeValidationItems(validation.conflicts);
+      validation.warnings = dedupeValidationItems(validation.warnings);
 
       if (validation.conflicts.length > 0) {
         await rejectEdit(client, requestId, 'validation_failed', validation);
@@ -758,6 +840,7 @@ app.patch('/api/sessions/:id', async (req, res, next) => {
       }
 
       const beforePayload = await serializeSession(client, sessionId);
+      const pairedBeforePayload = movesPair ? await serializeSession(client, paired.id) : null;
       const updated = await client.query(
         `UPDATE sessions
          SET day = $2,
@@ -818,17 +901,58 @@ app.patch('/api/sessions/:id', async (req, res, next) => {
         ]
       );
 
+      if (movesPair) {
+        await client.query(
+          `UPDATE sessions
+           SET day = $2,
+               slot_key = $3,
+               slot_index = $4,
+               session_name = $5,
+               time_label = $6,
+               start_minute = $7,
+               end_minute = $8,
+               room_id = $9,
+               capacity = $10,
+               allow_room_conflicts = $11,
+               row_version = row_version + 1,
+               updated_by = $12
+           WHERE id = $1`,
+          [
+            paired.id,
+            pairedNextSession.day,
+            pairedNextSession.slot_key,
+            pairedNextSession.slot_index,
+            pairedNextSession.session_name,
+            pairedNextSession.time_label,
+            pairedNextSession.start_minute,
+            pairedNextSession.end_minute,
+            pairedNextSession.room_id,
+            pairedNextSession.capacity,
+            pairedNextSession.allow_room_conflicts,
+            payload.updatedBy || null
+          ]
+        );
+      }
+
       const afterPayload = await serializeSession(client, sessionId);
       await client.query(
         `INSERT INTO session_audit_log (session_id, edit_request_id, changed_by, before_payload, after_payload)
          VALUES ($1, $2, $3, $4, $5)`,
         [sessionId, requestId, payload.updatedBy || null, beforePayload, afterPayload]
       );
+      if (movesPair) {
+        const pairedAfterPayload = await serializeSession(client, paired.id);
+        await client.query(
+          `INSERT INTO session_audit_log (session_id, edit_request_id, changed_by, before_payload, after_payload)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [paired.id, requestId, payload.updatedBy || null, pairedBeforePayload, pairedAfterPayload]
+        );
+      }
       await client.query(
         `UPDATE edit_requests
          SET status = 'applied', result = $2, completed_at = now()
          WHERE id = $1`,
-        [requestId, { warnings: validation.warnings }]
+        [requestId, { warnings: validation.warnings, pairedSessionId: movesPair ? String(paired.id) : null }]
       );
 
       const row = await client.query(`${sessionSelectSql()} WHERE s.id = $1`, [updated.rows[0].id]);
@@ -837,6 +961,7 @@ app.patch('/api/sessions/:id', async (req, res, next) => {
         body: {
           success: true,
           session: mapSessionRow(row.rows[0]),
+          pairedSessionId: movesPair ? String(paired.id) : null,
           warnings: validation.warnings,
           editRequestId: requestId
         }
@@ -1091,6 +1216,8 @@ function sessionListSelectSql() {
       s.id,
       s.schedule_type,
       s.course_instance_id,
+      coalesce(s.source_course_instance_key, s.raw_payload->>'course_instance_id', s.course_instance_id::text) AS source_course_instance_key,
+      coalesce(s.partner_course_instance_key, s.raw_payload->>'partner_instance_id', s.partner_instance_id::text) AS partner_course_instance_key,
       s.course_code,
       s.course_name,
       s.session_type,
@@ -1121,7 +1248,11 @@ function sessionListSelectSql() {
       s.group_index,
       s.department,
       s.semester,
+      s.section_index,
       s.day_pattern,
+      s.is_co_scheduled,
+      s.co_schedule_info,
+      s.room_conflict_override,
       s.allow_capacity_override,
       s.row_version,
       wd.day_order
@@ -1132,11 +1263,14 @@ function sessionListSelectSql() {
 }
 
 function mapSessionRow(row) {
+  const sectionIndex = getSectionIndex(row);
   return {
     id: row.id,
     externalId: row.external_id,
     scheduleType: row.schedule_type,
     courseInstanceId: row.course_instance_id,
+    sourceCourseInstanceId: getSourceCourseInstanceKey(row),
+    partnerCourseInstanceId: getPartnerCourseInstanceKey(row),
     courseCode: row.course_code,
     courseCodeDisplay: row.course_code_display,
     courseName: row.course_name,
@@ -1154,6 +1288,7 @@ function mapSessionRow(row) {
     roomType: row.room_type,
     roomIsLab: row.room_is_lab,
     roomAllowConflicts: row.room_allow_conflicts,
+    roomConflictOverride: row.room_conflict_override,
     allowCapacityOverride: row.allow_capacity_override,
     day: normalizeDay(row.day),
     slotKey: row.slot_key,
@@ -1174,6 +1309,9 @@ function mapSessionRow(row) {
     groupIndex: row.group_index,
     department: row.department,
     semester: row.semester,
+    sectionIndex,
+    sectionLabel: getSectionLabel(row),
+    sectionKey: getSectionKey(row),
     dayPattern: row.day_pattern,
     isCoScheduled: row.is_co_scheduled,
     coScheduleInfo: row.co_schedule_info,
@@ -1186,10 +1324,13 @@ function mapSessionRow(row) {
 }
 
 function mapSessionListRow(row) {
+  const sectionIndex = getSectionIndex(row);
   return {
     id: row.id,
     scheduleType: row.schedule_type,
     courseInstanceId: row.course_instance_id,
+    sourceCourseInstanceId: getSourceCourseInstanceKey(row),
+    partnerCourseInstanceId: getPartnerCourseInstanceKey(row),
     courseCode: row.course_code,
     courseName: row.course_name,
     sessionType: row.session_type,
@@ -1220,10 +1361,40 @@ function mapSessionListRow(row) {
     groupIndex: row.group_index,
     department: row.department,
     semester: row.semester,
+    sectionIndex,
+    sectionLabel: getSectionLabel(row),
+    sectionKey: getSectionKey(row),
     dayPattern: row.day_pattern,
     allowCapacityOverride: row.allow_capacity_override,
+    isCoScheduled: row.is_co_scheduled,
+    coScheduleInfo: row.co_schedule_info,
+    roomConflictOverride: row.room_conflict_override,
     rowVersion: row.row_version
   };
+}
+
+async function findPairedOccurrence(clientOrPool, session, forUpdate = false) {
+  if (!isPairedSectionSession(session)) return null;
+  const sourceKey = getSourceCourseInstanceKey(session);
+  const partnerKey = getPartnerCourseInstanceKey(session);
+  const result = await clientOrPool.query(
+    `${sessionSelectSql()}
+     WHERE s.status = 'active'
+       AND s.id <> $1
+       AND s.semester = 3
+       AND s.department = $2
+       AND s.is_co_scheduled = true
+       AND coalesce(s.source_course_instance_key, s.raw_payload->>'course_instance_id', s.course_instance_id::text) = $3
+       AND coalesce(s.partner_course_instance_key, s.raw_payload->>'partner_instance_id', s.partner_instance_id::text) = $4
+       AND s.day = $5
+       AND s.start_minute = $6
+       AND s.end_minute = $7
+     ORDER BY s.id
+     LIMIT 1
+     ${forUpdate ? 'FOR UPDATE OF s' : ''}`,
+    [session.id, session.department, partnerKey, sourceKey, session.day, session.start_minute, session.end_minute]
+  );
+  return result.rows[0] || null;
 }
 
 function mapActivityRow(row) {
@@ -1294,6 +1465,33 @@ function formatCourseCodeDisplay(scheduleType, courseCode, session = {}) {
   return batchText ? `${courseCode} ${batchText}` : courseCode;
 }
 
+function excludeIntentionalPairedRoomOverlap(leftAlias, rightAlias) {
+  return `AND NOT (
+    ${leftAlias}.semester = 3
+    AND ${rightAlias}.semester = 3
+    AND ${leftAlias}.department = ${rightAlias}.department
+    AND ${leftAlias}.section_index = ${rightAlias}.section_index
+    AND ${leftAlias}.section_index IS NOT NULL
+    AND ${leftAlias}.is_co_scheduled = true
+    AND ${rightAlias}.is_co_scheduled = true
+    AND ${leftAlias}.source_course_instance_key = ${rightAlias}.partner_course_instance_key
+    AND ${leftAlias}.partner_course_instance_key = ${rightAlias}.source_course_instance_key
+  )`;
+}
+
+function excludeApprovedDbmsOopsOverlap(leftAlias, rightAlias) {
+  return `AND NOT (
+    ${leftAlias}.semester = 3
+    AND ${rightAlias}.semester = 3
+    AND ${leftAlias}.department = ${rightAlias}.department
+    AND ${leftAlias}.section_index IS NOT NULL
+    AND ${rightAlias}.section_index IS NOT NULL
+    AND ${leftAlias}.section_index <> ${rightAlias}.section_index
+    AND ARRAY[upper(coalesce(${leftAlias}.course_code, '')), upper(coalesce(${rightAlias}.course_code, ''))]
+        @> ARRAY['CS23332', 'CS23333']::text[]
+  )`;
+}
+
 async function getConflictSummary(client = pool) {
   return getConflictCounts(client);
 }
@@ -1311,6 +1509,7 @@ async function getConflicts(limit) {
        AND s1.teacher_id = s2.teacher_id
        AND s1.day = s2.day
        AND int4range(s1.start_minute, s1.end_minute, '[)') && int4range(s2.start_minute, s2.end_minute, '[)')
+       ${excludeApprovedDbmsOopsOverlap('s1', 's2')}
      JOIN teachers t ON t.id = s1.teacher_id
      ORDER BY s1.day, s1.start_minute
      LIMIT $1`,
@@ -1319,19 +1518,50 @@ async function getConflicts(limit) {
     const room = await client.query(
       `SELECT 'room_conflict' AS type, s1.id AS session_a_id, s2.id AS session_b_id,
             r.room_number AS label, s1.day, s1.time_label AS time_a, s2.time_label AS time_b,
-            s1.course_code AS course_a, s2.course_code AS course_b
+            s1.course_code AS course_a, s2.course_code AS course_b,
+            s1.department AS department_a, s2.department AS department_b,
+            s1.semester AS semester_a, s2.semester AS semester_b,
+            (s1.room_conflict_override OR s2.room_conflict_override) AS bypassed
      FROM sessions s1
      JOIN sessions s2 ON s1.id < s2.id
        AND s1.status = 'active'
        AND s2.status = 'active'
        AND s1.room_id = s2.room_id
        AND s1.day = s2.day
-       AND s1.allow_room_conflicts = false
-       AND s2.allow_room_conflicts = false
+       AND (
+         (s1.allow_room_conflicts = false AND s2.allow_room_conflicts = false)
+         OR s1.room_conflict_override = true
+         OR s2.room_conflict_override = true
+       )
        AND int4range(s1.start_minute, s1.end_minute, '[)') && int4range(s2.start_minute, s2.end_minute, '[)')
+       ${excludeIntentionalPairedRoomOverlap('s1', 's2')}
+       ${excludeApprovedDbmsOopsOverlap('s1', 's2')}
      JOIN rooms r ON r.id = s1.room_id
      ORDER BY s1.day, s1.start_minute
      LIMIT $1`,
+      [limit]
+    );
+    const section = await client.query(
+      `SELECT 'section_conflict' AS type, s1.id AS session_a_id, s2.id AS session_b_id,
+            s1.department AS label, s1.day, s1.time_label AS time_a, s2.time_label AS time_b,
+            s1.course_code AS course_a, s2.course_code AS course_b,
+            s1.department AS department_a, s2.department AS department_b,
+            s1.semester AS semester_a, s2.semester AS semester_b,
+            s1.section_index
+       FROM sessions s1
+       JOIN sessions s2 ON s1.id < s2.id
+         AND s1.status = 'active'
+         AND s2.status = 'active'
+         AND s1.semester = 3
+         AND s2.semester = 3
+         AND s1.department = s2.department
+         AND s1.section_index = s2.section_index
+         AND s1.section_index IS NOT NULL
+         AND s1.day = s2.day
+         AND int4range(s1.start_minute, s1.end_minute, '[)') && int4range(s2.start_minute, s2.end_minute, '[)')
+         ${excludeIntentionalPairedRoomOverlap('s1', 's2')}
+       ORDER BY s1.day, s1.start_minute
+       LIMIT $1`,
       [limit]
     );
     const capacity = await client.query(
@@ -1344,6 +1574,8 @@ async function getConflicts(limit) {
        AND s.capacity IS NOT NULL
        AND s.allow_capacity_override = false
        AND CASE
+         WHEN s.semester = 3 AND s.is_co_scheduled AND s.partner_course_instance_key IS NOT NULL
+           THEN ceil(coalesce(s.student_count, 0)::numeric / 2)
          WHEN s.is_batched THEN ceil(coalesce(s.student_count, 0)::numeric / greatest(coalesce(s.num_batches, 2), 1))
          ELSE coalesce(s.student_count, 0)
        END > s.capacity
@@ -1355,7 +1587,7 @@ async function getConflicts(limit) {
 
     return {
       summary: count,
-      rows: [...teacher.rows, ...room.rows, ...capacity.rows].slice(0, limit)
+      rows: [...room.rows, ...teacher.rows, ...section.rows, ...capacity.rows].slice(0, limit)
     };
   });
 }
@@ -1366,15 +1598,29 @@ async function getConflictCounts(client = pool) {
        (SELECT count(*)::int FROM sessions s1 JOIN sessions s2 ON s1.id < s2.id
         AND s1.status = 'active' AND s2.status = 'active'
         AND s1.teacher_id = s2.teacher_id AND s1.day = s2.day
-        AND int4range(s1.start_minute, s1.end_minute, '[)') && int4range(s2.start_minute, s2.end_minute, '[)')) AS teacher,
+        AND int4range(s1.start_minute, s1.end_minute, '[)') && int4range(s2.start_minute, s2.end_minute, '[)')
+        ${excludeApprovedDbmsOopsOverlap('s1', 's2')}) AS teacher,
        (SELECT count(*)::int FROM sessions s1 JOIN sessions s2 ON s1.id < s2.id
         AND s1.status = 'active' AND s2.status = 'active'
         AND s1.room_id = s2.room_id AND s1.day = s2.day
-        AND s1.allow_room_conflicts = false AND s2.allow_room_conflicts = false
-        AND int4range(s1.start_minute, s1.end_minute, '[)') && int4range(s2.start_minute, s2.end_minute, '[)')) AS room,
+        AND ((s1.allow_room_conflicts = false AND s2.allow_room_conflicts = false)
+          OR s1.room_conflict_override = true OR s2.room_conflict_override = true)
+        AND int4range(s1.start_minute, s1.end_minute, '[)') && int4range(s2.start_minute, s2.end_minute, '[)')
+        ${excludeIntentionalPairedRoomOverlap('s1', 's2')}
+        ${excludeApprovedDbmsOopsOverlap('s1', 's2')}) AS room,
+       (SELECT count(*)::int FROM sessions s1 JOIN sessions s2 ON s1.id < s2.id
+        AND s1.status = 'active' AND s2.status = 'active'
+        AND s1.semester = 3 AND s2.semester = 3
+        AND s1.department = s2.department
+        AND s1.section_index = s2.section_index AND s1.section_index IS NOT NULL
+        AND s1.day = s2.day
+        AND int4range(s1.start_minute, s1.end_minute, '[)') && int4range(s2.start_minute, s2.end_minute, '[)')
+        ${excludeIntentionalPairedRoomOverlap('s1', 's2')}) AS section,
        (SELECT count(*)::int FROM sessions s
         WHERE s.status = 'active' AND s.capacity IS NOT NULL AND s.allow_capacity_override = false
           AND CASE
+          WHEN s.semester = 3 AND s.is_co_scheduled AND s.partner_course_instance_key IS NOT NULL
+            THEN ceil(coalesce(s.student_count, 0)::numeric / 2)
           WHEN s.is_batched THEN ceil(coalesce(s.student_count, 0)::numeric / greatest(coalesce(s.num_batches, 2), 1))
         ELSE coalesce(s.student_count, 0)
         END > s.capacity) AS capacity`
@@ -1383,8 +1629,9 @@ async function getConflictCounts(client = pool) {
   return {
     teacher: count.rows[0].teacher,
     room: count.rows[0].room,
+    section: count.rows[0].section,
     capacity: count.rows[0].capacity,
-    total: count.rows[0].teacher + count.rows[0].room + count.rows[0].capacity
+    total: count.rows[0].teacher + count.rows[0].room + count.rows[0].section + count.rows[0].capacity
   };
 }
 

@@ -1,5 +1,7 @@
 # Changer
 
+See [SECOND_YEAR_IMPORT.md](SECOND_YEAR_IMPORT.md) for the repeatable Semester 3 section import and Supabase verification procedure.
+
 Changer is now a PostgreSQL-backed timetable editor for post-scheduler manual changes.
 
 ## What changed

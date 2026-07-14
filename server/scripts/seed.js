@@ -9,6 +9,7 @@ import { getRoomCapacity, getRoomType } from '../roomRules.js';
 
 const BYPASS_ROOMS = new Set([
   'A104/105',
+  'KS02',
   'KSL02',
   'KSL03',
   'ANEW101',

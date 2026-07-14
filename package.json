@@ -16,6 +16,7 @@
     "db:migrate": "node server/scripts/migrate.js",
     "db:seed": "node server/scripts/seed.js",
     "db:seed:if-empty": "node server/scripts/seed-if-empty.js",
+    "db:import:second-year": "node server/scripts/import-second-year.js",
     "deploy:init": "npm run db:migrate && npm run db:seed:if-empty",
     "db:reset": "npm run db:migrate && npm run db:seed"
   },

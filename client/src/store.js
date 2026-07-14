@@ -6,6 +6,7 @@ export const emptyFilters = {
   department: '',
   semester: '',
   group: '',
+  section: '',
   dayPattern: '',
   course: '',
   teacher: '',
@@ -61,12 +62,13 @@ export const useChangerStore = create((set) => ({
   updateFilter: (key, value) => set((state) => {
     const next = { ...state.filters, [key]: value };
     if (key === 'department') {
-      next.semester = '';
       next.group = '';
+      next.section = '';
       next.dayPattern = '';
     }
     if (key === 'semester') {
       next.group = '';
+      next.section = '';
     }
     return { filters: next };
   }),

@@ -30,6 +30,25 @@ const LEGACY_LAB_ROOMS = new Set([
   'tlfl3'
 ]);
 
+const SHARED_COLLISION_ROOMS = new Set([
+  'a104/105',
+  'anew101',
+  'anew102',
+  'anew103',
+  'anew104',
+  'ks02',
+  'ksl02'
+]);
+
+export function canonicalRoomNumber(roomNumber) {
+  const normalized = String(roomNumber || '').trim();
+  return normalized.toUpperCase() === 'KS02' ? 'KSL02' : normalized;
+}
+
+export function isSharedCollisionRoom(roomNumber) {
+  return SHARED_COLLISION_ROOMS.has(String(roomNumber || '').trim().toLowerCase());
+}
+
 export function getRoomType(roomNumber, room = null) {
   if (room?.isLab || room?.is_lab) return 'lab';
   if (!roomNumber) return 'unknown';
