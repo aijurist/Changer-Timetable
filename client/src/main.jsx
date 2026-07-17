@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowLeftRight,
+  CalendarDays,
   Check,
   Clock,
   Database,
@@ -20,6 +21,7 @@ import {
   Save,
   Scissors,
   Search,
+  ShieldCheck,
   Trash2,
   X
 } from 'lucide-react';
@@ -89,7 +91,7 @@ function RootApp() {
 }
 
 function LoginPage({ onAuthenticated, onCancel }) {
-  const [email, setEmail] = useState('changeradmin@gmail.com');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -111,53 +113,76 @@ function LoginPage({ onAuthenticated, onCancel }) {
 
   return (
     <main className="login-page">
-      <section className="login-panel" aria-labelledby="login-title">
-        <button className="login-back" type="button" onClick={onCancel}>
-          <ArrowLeft size={16} /> Back to timetable
-        </button>
-        <div className="login-brand-mark"><LockKeyhole size={24} /></div>
-        <div className="login-heading">
-          <span>University Timetable Scheduler</span>
-          <h1 id="login-title">Changer</h1>
-          <p>Sign in to manage the published timetable.</p>
-        </div>
-        <form className="login-form" onSubmit={submit}>
-          <label>
-            Email
-            <span className="login-input">
-              <Mail size={17} />
-              <input
-                type="email"
-                autoComplete="username"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                required
-              />
-            </span>
-          </label>
-          <label>
-            Password
-            <span className="login-input">
-              <LockKeyhole size={17} />
-              <input
-                type={showPassword ? 'text' : 'password'}
-                autoComplete="current-password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                required
-              />
-              <button type="button" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? 'Hide password' : 'Show password'}>
-                {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
-              </button>
-            </span>
-          </label>
-          {error && <div className="login-error" role="alert">{error}</div>}
-          <button className="login-submit" type="submit" disabled={submitting}>
-            {submitting ? <RefreshCw className="spin-slow" size={17} /> : <LockKeyhole size={17} />}
-            {submitting ? 'Signing in' : 'Sign in'}
+      <div className="login-shell">
+        <aside className="login-brand" aria-label="Changer administration">
+          <div className="login-product">
+            <span className="login-product-mark"><CalendarDays size={22} /></span>
+            <span><strong>Changer</strong><small>Timetable administration</small></span>
+          </div>
+          <div className="login-brand-copy">
+            <span>Administration portal</span>
+            <h2>Published timetable control.</h2>
+            <p>Secure access for authorized scheduling staff.</p>
+          </div>
+          <div className="login-mini-schedule" aria-hidden="true">
+            {Array.from({ length: 20 }, (_, index) => (
+              <span className={[1, 7, 10, 14, 18].includes(index) ? `active tone-${index % 4}` : ''} key={index} />
+            ))}
+          </div>
+          <div className="login-brand-footer"><ShieldCheck size={17} /> Protected administrator access</div>
+        </aside>
+
+        <section className="login-panel" aria-labelledby="login-title">
+          <button className="login-back" type="button" onClick={onCancel}>
+            <ArrowLeft size={16} /> Back to timetable
           </button>
-        </form>
-      </section>
+          <div className="login-heading">
+            <span>Administrator sign in</span>
+            <h1 id="login-title">Welcome back</h1>
+            <p>Enter your administrator credentials to continue.</p>
+          </div>
+          <form className="login-form" onSubmit={submit}>
+            <label>
+              Email address
+              <span className="login-input">
+                <Mail size={18} />
+                <input
+                  type="email"
+                  autoComplete="username"
+                  placeholder="admin@university.edu"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  autoFocus
+                  required
+                />
+              </span>
+            </label>
+            <label>
+              Password
+              <span className="login-input">
+                <LockKeyhole size={18} />
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  placeholder="Enter your password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  required
+                />
+                <button type="button" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? 'Hide password' : 'Show password'}>
+                  {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </span>
+            </label>
+            {error && <div className="login-error" role="alert" aria-live="polite">{error}</div>}
+            <button className="login-submit" type="submit" disabled={submitting || !email || !password}>
+              {submitting ? <RefreshCw className="spin-slow" size={18} /> : <LockKeyhole size={18} />}
+              {submitting ? 'Signing in' : 'Sign in securely'}
+            </button>
+          </form>
+          <div className="login-security-note"><ShieldCheck size={15} /> Authorized users only</div>
+        </section>
+      </div>
     </main>
   );
 }
