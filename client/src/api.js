@@ -2,6 +2,7 @@ const API_BASE = import.meta.env.VITE_API_BASE || '';
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options
   });
@@ -12,12 +13,21 @@ async function request(path, options = {}) {
     const error = new Error(body?.message || response.statusText);
     error.status = response.status;
     error.body = body;
+    if (response.status === 401 && !path.startsWith('/api/auth/')) {
+      window.dispatchEvent(new CustomEvent('changer:unauthorized'));
+    }
     throw error;
   }
   return body;
 }
 
 export const api = {
+  me: () => request('/api/auth/me'),
+  login: (email, password) => request('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password })
+  }),
+  logout: () => request('/api/auth/logout', { method: 'POST' }),
   meta: () => request('/api/meta'),
   sessions: (params) => request(`/api/sessions?${new URLSearchParams(cleanParams(params))}`),
   session: (id) => request(`/api/sessions/${id}`),

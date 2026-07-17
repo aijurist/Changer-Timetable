@@ -3,12 +3,18 @@ import { createRoot } from 'react-dom/client';
 import {
   Plus,
   AlertTriangle,
+  ArrowLeft,
   ArrowLeftRight,
   Check,
   Clock,
   Database,
   Download,
+  Eye,
+  EyeOff,
   History,
+  LockKeyhole,
+  LogOut,
+  Mail,
   RefreshCw,
   RotateCcw,
   Save,
@@ -28,7 +34,134 @@ const viewOptions = [
   ['day', 'Day-wise']
 ];
 
-function App() {
+function RootApp() {
+  const [auth, setAuth] = useState({ checking: true, user: null, showLogin: false });
+
+  useEffect(() => {
+    api.me()
+      .then((result) => setAuth({ checking: false, user: result.user, showLogin: false }))
+      .catch((error) => {
+        if (error.status !== 401) console.error(error);
+        setAuth({ checking: false, user: null, showLogin: false });
+      });
+  }, []);
+
+  useEffect(() => {
+    const handleUnauthorized = () => setAuth({ checking: false, user: null, showLogin: true });
+    window.addEventListener('changer:unauthorized', handleUnauthorized);
+    return () => window.removeEventListener('changer:unauthorized', handleUnauthorized);
+  }, []);
+
+  if (auth.checking) {
+    return (
+      <main className="loading-shell">
+        <Database className="spin-slow" />
+        <span>Checking secure session</span>
+      </main>
+    );
+  }
+
+  if (!auth.user && auth.showLogin) {
+    return (
+      <LoginPage
+        onAuthenticated={(user) => setAuth({ checking: false, user, showLogin: false })}
+        onCancel={() => setAuth({ checking: false, user: null, showLogin: false })}
+      />
+    );
+  }
+
+  async function logout() {
+    try {
+      await api.logout();
+    } finally {
+      setAuth({ checking: false, user: null, showLogin: false });
+    }
+  }
+
+  return (
+    <ChangerApp
+      authUser={auth.user}
+      onLogin={() => setAuth({ checking: false, user: null, showLogin: true })}
+      onLogout={logout}
+    />
+  );
+}
+
+function LoginPage({ onAuthenticated, onCancel }) {
+  const [email, setEmail] = useState('changeradmin@gmail.com');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  async function submit(event) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError('');
+    try {
+      const result = await api.login(email, password);
+      onAuthenticated(result.user);
+    } catch (loginError) {
+      setError(loginError.message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="login-page">
+      <section className="login-panel" aria-labelledby="login-title">
+        <button className="login-back" type="button" onClick={onCancel}>
+          <ArrowLeft size={16} /> Back to timetable
+        </button>
+        <div className="login-brand-mark"><LockKeyhole size={24} /></div>
+        <div className="login-heading">
+          <span>University Timetable Scheduler</span>
+          <h1 id="login-title">Changer</h1>
+          <p>Sign in to manage the published timetable.</p>
+        </div>
+        <form className="login-form" onSubmit={submit}>
+          <label>
+            Email
+            <span className="login-input">
+              <Mail size={17} />
+              <input
+                type="email"
+                autoComplete="username"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                required
+              />
+            </span>
+          </label>
+          <label>
+            Password
+            <span className="login-input">
+              <LockKeyhole size={17} />
+              <input
+                type={showPassword ? 'text' : 'password'}
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+              />
+              <button type="button" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? 'Hide password' : 'Show password'}>
+                {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
+            </span>
+          </label>
+          {error && <div className="login-error" role="alert">{error}</div>}
+          <button className="login-submit" type="submit" disabled={submitting}>
+            {submitting ? <RefreshCw className="spin-slow" size={17} /> : <LockKeyhole size={17} />}
+            {submitting ? 'Signing in' : 'Sign in'}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function ChangerApp({ authUser, onLogin, onLogout }) {
   const [showConflicts, setShowConflicts] = useState(false);
   const {
     page,
@@ -76,6 +209,10 @@ function App() {
     closeCreateSession
   } = useChangerStore();
 
+  useEffect(() => {
+    if (!authUser && page === 'logs') setPage('schedule');
+  }, [authUser, page, setPage]);
+
   async function loadMeta() {
     const [metaResult, conflictResult] = await Promise.all([api.meta(), api.conflicts()]);
     setMeta(metaResult);
@@ -93,6 +230,10 @@ function App() {
   }
 
   async function loadActivity() {
+    if (!authUser) {
+      setActivity([]);
+      return;
+    }
     const result = await api.activity(50);
     setActivity(result);
   }
@@ -113,7 +254,7 @@ function App() {
     refreshAll()
       .catch((error) => setNotice({ type: 'error', text: error.message }))
       .finally(() => setLoading(false));
-  }, []);
+  }, [authUser?.id]);
 
   useEffect(() => {
     if (!notice) return undefined;
@@ -553,7 +694,7 @@ function App() {
         <div className="navbar-links">
           <button className={page === 'schedule' && viewType === 'department' ? 'active' : ''} onClick={() => { setPage('schedule'); setViewType('department'); }}>Course Selection</button>
           <button className={page === 'schedule' && viewType === 'room' ? 'active' : ''} onClick={() => { setPage('schedule'); setViewType('room'); }}>Room Timetable</button>
-          <button className={page === 'logs' ? 'active' : ''} onClick={() => setPage('logs')}>Logs</button>
+          {authUser && <button className={page === 'logs' ? 'active' : ''} onClick={() => setPage('logs')}>Logs</button>}
         </div>
         <div className="navbar-title">{page === 'logs' ? 'Change Logs' : 'Combined Schedule View'}</div>
         <div className="navbar-actions">
@@ -564,9 +705,21 @@ function App() {
           <button className="nav-button" onClick={() => refreshAll(filters)} disabled={refreshing}>
             <RefreshCw size={17} className={refreshing ? 'spin-slow' : ''} /> Refresh
           </button>
-          <button className="nav-button add-nav-button" onClick={() => openCreateSession()}>
-            <Plus size={17} /> Add Session
-          </button>
+          {authUser ? (
+            <>
+              <button className="nav-button add-nav-button" onClick={() => openCreateSession()}>
+                <Plus size={17} /> Add Session
+              </button>
+              <span className="nav-user" title={`Signed in as ${authUser.email}`}>{authUser.email}</span>
+              <button className="nav-button nav-icon-button" onClick={onLogout} title="Sign out" aria-label="Sign out">
+                <LogOut size={17} />
+              </button>
+            </>
+          ) : (
+            <button className="nav-button admin-login-button" onClick={onLogin}>
+              <LockKeyhole size={17} /> Admin login
+            </button>
+          )}
         </div>
       </nav>
 
@@ -676,8 +829,8 @@ function App() {
                   title={title}
                   sessions={rows}
                   meta={meta}
-                  onSelect={selectSession}
-                  onAdd={viewType === 'teacher' ? openCreateSession : null}
+                  onSelect={authUser ? selectSession : null}
+                  onAdd={authUser && viewType === 'teacher' ? openCreateSession : null}
                 />
               ))}
             </section>
@@ -685,7 +838,7 @@ function App() {
         )}
       </main>
 
-      {draft && selected && (
+      {authUser && draft && selected && (
         <EditModal
           selected={selected}
           draft={draft}
@@ -703,7 +856,7 @@ function App() {
         />
       )}
 
-      {createDraft && (
+      {authUser && createDraft && (
         <AddSessionModal
           draft={createDraft}
           slots={createSlots}
@@ -826,8 +979,8 @@ function SessionBlock({ session, onSelect }) {
     groupClass
   ].filter(Boolean).join(' ');
 
-  return (
-    <button className={`${className} editable-session`} onClick={() => onSelect(session)} title="Edit session">
+  const content = (
+    <>
       {isSection ? (
         <span className="section-number" title={`Section ${session.sectionLabel}`}>{session.sectionLabel}</span>
       ) : session.groupName && (
@@ -840,6 +993,12 @@ function SessionBlock({ session, onSelect }) {
       {session.scheduleType === 'lab' && <span className="session-batch">{batchText}</span>}
       {session.roomConflictOverride && <AlertTriangle className="session-conflict-marker" size={14} aria-label="Room conflict override" />}
       <small className="session-instance">{session.courseInstanceId || session.id}</small>
+    </>
+  );
+  if (!onSelect) return <div className={`${className} readonly-session`}>{content}</div>;
+  return (
+    <button className={`${className} editable-session`} onClick={() => onSelect(session)} title="Edit session">
+      {content}
     </button>
   );
 }
@@ -854,19 +1013,22 @@ function PairedSessionBlock({ sessions, onSelect }) {
     <div className="paired-session-block" aria-label={`Section ${sectionLabel} paired 25 plus 25 session`}>
       <span className="paired-mode">25 + 25</span>
       <span className="section-number" title={`Section ${sectionLabel}`}>{sectionLabel}</span>
-      {[first, second].map((session) => (
-        <button
-          key={session.id}
-          type="button"
-          className="paired-session-half"
-          onClick={() => onSelect(session)}
-          title={`Edit ${session.teacherName || session.courseCode}`}
-        >
-          <strong>{session.courseCode}</strong>
-          <span>{session.courseName || '-'}</span>
-          <small>{session.teacherName || '-'}</small>
-        </button>
-      ))}
+      {[first, second].map((session) => {
+        const Half = onSelect ? 'button' : 'div';
+        return (
+          <Half
+            key={session.id}
+            type={onSelect ? 'button' : undefined}
+            className={`paired-session-half${onSelect ? '' : ' readonly-session'}`}
+            onClick={onSelect ? () => onSelect(session) : undefined}
+            title={onSelect ? `Edit ${session.teacherName || session.courseCode}` : undefined}
+          >
+            <strong>{session.courseCode}</strong>
+            <span>{session.courseName || '-'}</span>
+            <small>{session.teacherName || '-'}</small>
+          </Half>
+        );
+      })}
       <span className="paired-room">{first.roomNumber || second.roomNumber || '-'}</span>
       {hasRoomConflict && <AlertTriangle className="session-conflict-marker" size={14} aria-label="Room conflict override" />}
     </div>
@@ -1078,7 +1240,6 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
             </div>
           )}
 
-          <label>Updated By<input value={draft.updatedBy} onChange={(event) => onChange('updatedBy', event.target.value)} placeholder="Staff name" /></label>
         </div>
 
         <footer className="modal-actions">
@@ -1235,7 +1396,6 @@ function AddSessionModal({ draft, slots, rooms, teachers, days, departments, sem
             </div>
           )}
 
-          <label>Updated By<input value={draft.updatedBy} onChange={(event) => onChange('updatedBy', event.target.value)} placeholder="Staff name" /></label>
         </div>
 
         <footer className="modal-actions">
@@ -1835,4 +1995,4 @@ function toOptionalNumber(value) {
 const rootElement = document.getElementById('root');
 const root = window.__changerRoot || createRoot(rootElement);
 window.__changerRoot = root;
-root.render(<App />);
+root.render(<RootApp />);

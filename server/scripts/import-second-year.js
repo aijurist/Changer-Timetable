@@ -5,6 +5,7 @@ import { parse as parseCsv } from 'csv-parse/sync';
 import { pool, closePool } from '../db.js';
 import { normalizeDay, parseTimeRange } from '../time.js';
 import { canonicalRoomNumber, isSharedCollisionRoom } from '../roomRules.js';
+import { normalizeStaffCode, sameTeacherIdentity } from '../teacherIdentity.js';
 
 const options = parseArgs(process.argv.slice(2));
 
@@ -43,7 +44,7 @@ async function main() {
   try {
     await client.query('BEGIN');
     await client.query("SET LOCAL app.seed_mode = 'on'");
-    const roomMap = await upsertReferenceData(client, selectedRows);
+    const { roomMap, teacherMap, teacherRemaps } = await upsertReferenceData(client, selectedRows);
     const slotMap = await ensureSlots(client, selectedRows);
 
     const archived = await client.query(
@@ -58,7 +59,7 @@ async function main() {
 
     const importedIds = [];
     for (const item of selectedRows) {
-      importedIds.push(await upsertSession(client, item, roomMap, slotMap));
+      importedIds.push(await upsertSession(client, item, roomMap, slotMap, teacherMap));
     }
 
     const verification = await verifyImportedSessions(client, importedIds);
@@ -88,6 +89,7 @@ async function main() {
       archivedPreviousSessions: archived.rowCount,
       visibleRoomConflicts: verification.room.length,
       roomOverrideSessions: roomOverrideIds.length,
+      teacherRemaps,
       visibleTeacherConflicts: verification.teacher.length,
       visibleSectionConflicts: verification.section.length,
       visibleCapacityConflicts: verification.capacity.length,
@@ -130,17 +132,7 @@ async function main() {
 async function upsertReferenceData(client, items) {
   const roomMap = new Map();
   const uniqueRows = uniqueBy(items.map((item) => item.row), (row) => `${row.room_id}:${row.room_number}`);
-
-  for (const row of uniqueBy(items.map((item) => item.row), (entry) => entry.teacher_id)) {
-    await client.query(
-      `INSERT INTO teachers (id, name, staff_code)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (id) DO UPDATE SET
-         name = excluded.name,
-         staff_code = coalesce(excluded.staff_code, teachers.staff_code)`,
-      [positiveInteger(row.teacher_id, 'teacher_id'), row.teacher_name || `Teacher ${row.teacher_id}`, row.staff_code || null]
-    );
-  }
+  const { teacherMap, teacherRemaps } = await upsertTeachers(client, items);
 
   for (const row of uniqueBy(items.map((item) => item.row), (entry) => baseInstanceId(entry.course_instance_id))) {
     await client.query(
@@ -212,7 +204,107 @@ async function upsertReferenceData(client, items) {
     );
     roomMap.set(sourceId, inserted.rows[0]);
   }
-  return roomMap;
+  return { roomMap, teacherMap, teacherRemaps };
+}
+
+async function upsertTeachers(client, items) {
+  await client.query("SELECT pg_advisory_xact_lock(hashtext('second_year_teacher_identity'))");
+  const incoming = uniqueBy(items.map((item) => item.row), (row) => positiveInteger(row.teacher_id, 'teacher_id'));
+  const retained = await client.query(
+    `SELECT DISTINCT s.teacher_id,
+       nullif(s.raw_payload->>'teacher_name', '') AS teacher_name,
+       nullif(s.raw_payload->>'staff_code', '') AS staff_code
+     FROM sessions s
+     WHERE s.status = 'active'
+       AND s.semester <> 3
+       AND nullif(s.raw_payload->>'teacher_name', '') IS NOT NULL`
+  );
+  const retainedById = new Map();
+  for (const row of retained.rows) {
+    if (!retainedById.has(row.teacher_id)) retainedById.set(row.teacher_id, []);
+    const identities = retainedById.get(row.teacher_id);
+    if (!identities.some((identity) => sameTeacherIdentity(identity, row))) identities.push(row);
+  }
+  const ambiguous = [...retainedById.entries()].filter(([, identities]) => identities.length > 1);
+  if (ambiguous.length) {
+    throw new Error(`Retained timetable has ${ambiguous.length} teacher IDs assigned to multiple staff identities.`);
+  }
+
+  for (const [teacherId, identities] of retainedById) {
+    const identity = identities[0];
+    await client.query(
+      `UPDATE teachers
+       SET name = $2,
+           staff_code = coalesce($3, staff_code)
+       WHERE id = $1`,
+      [teacherId, identity.teacher_name, normalizeStaffCode(identity.staff_code)]
+    );
+  }
+
+  const existing = (await client.query('SELECT id, name, staff_code FROM teachers ORDER BY id')).rows;
+  const byId = new Map(existing.map((teacher) => [teacher.id, teacher]));
+  let nextId = Math.max(0, ...existing.map((teacher) => Number(teacher.id))) + 1;
+  const teacherMap = new Map();
+  const teacherRemaps = [];
+
+  for (const row of incoming) {
+    const sourceId = positiveInteger(row.teacher_id, 'teacher_id');
+    const identity = {
+      teacher_name: row.teacher_name || `Teacher ${sourceId}`,
+      staff_code: normalizeStaffCode(row.staff_code)
+    };
+    const retainedIdentity = retainedById.get(sourceId)?.[0];
+    let targetId = sourceId;
+    let remapReason = null;
+    const candidates = existing.filter((teacher) => {
+      const protectedIdentity = retainedById.get(teacher.id)?.[0];
+      return sameTeacherIdentity(teacher, identity)
+        && (!protectedIdentity || sameTeacherIdentity(protectedIdentity, identity));
+    });
+    const protectedCandidate = candidates.find((teacher) => retainedById.has(teacher.id));
+    if (!retainedIdentity && protectedCandidate && protectedCandidate.id !== sourceId) {
+      targetId = protectedCandidate.id;
+      remapReason = 'canonical_higher_semester_match';
+    } else if (retainedIdentity && !sameTeacherIdentity(retainedIdentity, identity)) {
+      const candidate = protectedCandidate || candidates.find((teacher) => teacher.id !== sourceId);
+      if (candidate) targetId = candidate.id;
+      else {
+        while (byId.has(nextId)) nextId += 1;
+        targetId = nextId;
+        nextId += 1;
+      }
+      remapReason = candidate ? 'canonical_higher_semester_match' : 'reused_id_collision';
+    }
+
+    if (targetId !== sourceId) {
+      teacherRemaps.push({
+        sourceTeacherId: sourceId,
+        databaseTeacherId: targetId,
+        reason: remapReason,
+        teacherName: identity.teacher_name,
+        staffCode: identity.staff_code,
+        protectedTeacherName: retainedIdentity?.teacher_name || null,
+        protectedStaffCode: normalizeStaffCode(retainedIdentity?.staff_code)
+      });
+    }
+
+    await client.query(
+      `INSERT INTO teachers (id, name, staff_code)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (id) DO UPDATE SET
+         name = excluded.name,
+         staff_code = coalesce(excluded.staff_code, teachers.staff_code)`,
+      [targetId, identity.teacher_name, identity.staff_code]
+    );
+    const stored = { id: targetId, name: identity.teacher_name, staff_code: identity.staff_code };
+    byId.set(targetId, stored);
+    const existingIndex = existing.findIndex((teacher) => teacher.id === targetId);
+    if (existingIndex >= 0) existing[existingIndex] = stored;
+    else existing.push(stored);
+    teacherMap.set(sourceId, targetId);
+  }
+
+  return { teacherMap, teacherRemaps };
 }
 
 async function ensureSlots(client, items) {
@@ -238,7 +330,7 @@ async function ensureSlots(client, items) {
   return slotMap;
 }
 
-async function upsertSession(client, item, roomMap, slotMap) {
+async function upsertSession(client, item, roomMap, slotMap, teacherMap) {
   const { row, sourceIndex, scheduleType } = item;
   const room = roomMap.get(positiveInteger(row.room_id, 'room_id'));
   const slot = slotMap.get(`${scheduleType}:${slotKey(scheduleType, row)}`);
@@ -263,7 +355,7 @@ async function upsertSession(client, item, roomMap, slotMap) {
     practical_hours: nullableNumber(row.practical_hours),
     lecture_hours: nullableNumber(row.lecture_hours),
     tutorial_hours: nullableNumber(row.tutorial_hours),
-    teacher_id: positiveInteger(row.teacher_id, 'teacher_id'),
+    teacher_id: teacherMap.get(positiveInteger(row.teacher_id, 'teacher_id')),
     room_id: room.id,
     day: normalizeDay(row.day),
     slot_key: slot.slot_key,
@@ -293,7 +385,7 @@ async function upsertSession(client, item, roomMap, slotMap) {
     partner_instance_id: partnerKey ? baseInstanceId(partnerKey) : null,
     partner_group: row.partner_group || null,
     capacity_info: row.capacity_info || null,
-    raw_payload: JSON.stringify(row),
+    raw_payload: JSON.stringify({ ...row, database_teacher_id: teacherMap.get(positiveInteger(row.teacher_id, 'teacher_id')) }),
     allow_room_conflicts: Boolean(room.allow_conflicts) || isSharedCollisionRoom(room.room_number),
     room_conflict_override: false,
     status: 'active',

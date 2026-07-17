@@ -23,8 +23,10 @@ import {
   isPairedSectionSession
 } from './section.js';
 import { normalizeDay } from './time.js';
+import { createAuthRouter, requireAuth } from './auth.js';
 
 const app = express();
+if (config.nodeEnv === 'production') app.set('trust proxy', 1);
 app.use(express.json({ limit: '2mb' }));
 
 app.use((req, res, next) => {
@@ -32,6 +34,7 @@ app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', config.clientOrigin);
     res.header('Access-Control-Allow-Headers', 'Content-Type');
     res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+    res.header('Access-Control-Allow-Credentials', 'true');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   return next();
@@ -141,6 +144,9 @@ app.get('/api/health', async (_req, res, next) => {
     next(error);
   }
 });
+
+app.use('/api/auth', createAuthRouter(pool, { secureCookies: config.nodeEnv === 'production' }));
+const adminOnly = requireAuth(pool);
 
 app.get('/api/meta', async (_req, res, next) => {
   try {
@@ -380,7 +386,7 @@ app.get('/api/conflicts', async (req, res, next) => {
   }
 });
 
-app.get('/api/activity', async (req, res, next) => {
+app.get('/api/activity', adminOnly, async (req, res, next) => {
   try {
     const limit = boundedInt(req.query.limit, 20, 1, 100);
     const result = await pool.query(
@@ -448,9 +454,10 @@ app.get('/api/export/:type.:format', async (req, res, next) => {
   }
 });
 
-app.post('/api/sessions', async (req, res, next) => {
+app.post('/api/sessions', adminOnly, async (req, res, next) => {
   try {
     const payload = sessionCreateSchema.parse(req.body);
+    payload.updatedBy = req.auth.user.email;
 
     const result = await withTransaction(async (client) => {
       const request = await client.query(
@@ -641,10 +648,10 @@ app.post('/api/sessions', async (req, res, next) => {
   }
 });
 
-app.delete('/api/sessions/:id', async (req, res, next) => {
+app.delete('/api/sessions/:id', adminOnly, async (req, res, next) => {
   try {
     const sessionId = positiveId(req.params.id, 'session id');
-    const updatedBy = String(req.query.updatedBy || req.body?.updatedBy || 'staff').trim().slice(0, 120);
+    const updatedBy = req.auth.user.email;
 
     const result = await withTransaction(async (client) => {
       const request = await client.query(
@@ -701,9 +708,10 @@ app.delete('/api/sessions/:id', async (req, res, next) => {
   }
 });
 
-app.patch('/api/sessions/:id', async (req, res, next) => {
+app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
   try {
     const payload = sessionPatchSchema.parse(req.body);
+    payload.updatedBy = req.auth.user.email;
     const sessionId = positiveId(req.params.id, 'session id');
 
     const result = await withTransaction(async (client) => {
@@ -974,11 +982,11 @@ app.patch('/api/sessions/:id', async (req, res, next) => {
   }
 });
 
-app.post('/api/sessions/:id/swap-room', async (req, res, next) => {
+app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
   try {
     const payload = roomSwapSchema.parse(req.body);
     const sessionId = positiveId(req.params.id, 'session id');
-    const updatedBy = payload.updatedBy || 'staff';
+    const updatedBy = req.auth.user.email;
 
     if (sessionId === payload.otherSessionId) {
       throw new HttpError(400, 'Pick another booked session to swap with.');

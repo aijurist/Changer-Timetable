@@ -4,6 +4,8 @@ See [SECOND_YEAR_IMPORT.md](SECOND_YEAR_IMPORT.md) for the repeatable Semester 3
 
 Changer is now a PostgreSQL-backed timetable editor for post-scheduler manual changes.
 
+The timetable and exports are publicly readable. Creating, editing, deleting, swapping rooms, and viewing change logs require the seeded admin login; there is no registration endpoint.
+
 ## What changed
 
 - `theory_schedule.json`, `lab_schedule.json`, `rooms_new.csv`, and `scheduler.yaml` seed the database from `data/import/`.
@@ -22,6 +24,7 @@ Changer is now a PostgreSQL-backed timetable editor for post-scheduler manual ch
 - `sessions`: one row per timetable activity, including normalized day/time, room, teacher, capacity, and the original JSON payload.
 - `edit_requests`: synchronous request queue/audit envelope for every attempted edit.
 - `session_audit_log`: before/after payloads for applied edits.
+- `app_users`, `auth_sessions`: the seeded admin account and revocable HTTP-only login sessions.
 
 ## Local run
 
@@ -31,6 +34,7 @@ docker compose up -d postgres
 npm install
 npm run db:migrate
 npm run db:seed
+npm run db:seed:admin
 npm run dev
 ```
 
@@ -44,6 +48,7 @@ API: `http://localhost:8080`
 npm install
 npm run db:migrate
 npm run db:seed:if-empty
+npm run db:seed:admin
 npm run build
 npm start
 ```
@@ -74,8 +79,9 @@ Recommended free setup:
    - Health check: `/api/health`
 4. Add the `DATABASE_URL` environment variable from Supabase.
 5. Add `DATABASE_SSL=relaxed` when using the Supabase shared pooler URL.
+6. Add `AUTH_ADMIN_PASSWORD` as a secret. `AUTH_ADMIN_EMAIL` defaults to `changeradmin@gmail.com`.
 
-`npm run deploy:init` runs migrations and then `db:seed:if-empty`. This seeds the imported timetable only when the `sessions` table is empty. It will not wipe staff edits on later deploys.
+`npm run deploy:init` runs migrations, `db:seed:if-empty`, and the single-admin seed check. The timetable seed runs only when `sessions` is empty. An existing admin password is preserved when `AUTH_ADMIN_PASSWORD` is absent.
 
 ### Required production environment variables
 
@@ -83,6 +89,8 @@ Recommended free setup:
 NODE_ENV=production
 DATABASE_URL=postgresql://...
 DATABASE_SSL=relaxed
+AUTH_ADMIN_EMAIL=changeradmin@gmail.com
+AUTH_ADMIN_PASSWORD=...
 ```
 
 For Supabase pooler passwords with special characters, URL-encode the password before pasting it into `DATABASE_URL`. For example, `@` becomes `%40`. Do not include `?sslmode=require`; SSL is controlled by `DATABASE_SSL`.
