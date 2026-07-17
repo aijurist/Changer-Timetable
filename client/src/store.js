@@ -27,6 +27,7 @@ export const useChangerStore = create((set) => ({
   selected: null,
   draft: null,
   createDraft: null,
+  splitWizard: null,
   rooms: [],
   teachers: [],
   createRooms: [],
@@ -47,6 +48,7 @@ export const useChangerStore = create((set) => ({
   setSelected: (selected) => set({ selected }),
   setDraft: (draft) => set((state) => ({ draft: resolveUpdate(draft, state.draft) })),
   setCreateDraft: (createDraft) => set((state) => ({ createDraft: resolveUpdate(createDraft, state.createDraft) })),
+  setSplitWizard: (splitWizard) => set((state) => ({ splitWizard: resolveUpdate(splitWizard, state.splitWizard) })),
   setRooms: (rooms) => set({ rooms }),
   setTeachers: (teachers) => set({ teachers }),
   setCreateRooms: (createRooms) => set({ createRooms }),
@@ -74,5 +76,6 @@ export const useChangerStore = create((set) => ({
   }),
   resetFilters: () => set({ filters: emptyFilters }),
   closeEditor: () => set({ selected: null, draft: null }),
+  closeSplitWizard: () => set({ splitWizard: null }),
   closeCreateSession: () => set({ createDraft: null, createRooms: [], createTeachers: [] })
 }));

@@ -31,6 +31,11 @@ export const api = {
   meta: () => request('/api/meta'),
   sessions: (params) => request(`/api/sessions?${new URLSearchParams(cleanParams(params))}`),
   session: (id) => request(`/api/sessions/${id}`),
+  balancedSplitOptions: (id) => request(`/api/sessions/${id}/balanced-split-options`),
+  balancedSplit: (id, payload) => request(`/api/sessions/${id}/balanced-split`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  }),
   rooms: (params) => request(`/api/rooms?${new URLSearchParams(cleanParams(params))}`),
   teachers: (params) => request(`/api/teachers?${new URLSearchParams(cleanParams(params))}`),
   conflicts: () => request('/api/conflicts?limit=100'),

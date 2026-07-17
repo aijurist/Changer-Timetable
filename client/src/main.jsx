@@ -18,6 +18,7 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Scissors,
   Search,
   Trash2,
   X
@@ -181,6 +182,8 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     setDraft,
     createDraft,
     setCreateDraft,
+    splitWizard,
+    setSplitWizard,
     rooms,
     setRooms,
     teachers,
@@ -206,6 +209,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     updateFilter,
     resetFilters,
     closeEditor,
+    closeSplitWizard,
     closeCreateSession
   } = useChangerStore();
 
@@ -505,6 +509,57 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     } catch (error) {
       const details = error.body?.conflicts?.map((conflict) => conflict.message).join(' ');
       setNotice({ type: 'error', text: details || error.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function openBalancedSplit() {
+    if (!selected?.pairedSession) return;
+    setSaving(true);
+    setNotice(null);
+    try {
+      const options = await api.balancedSplitOptions(selected.id);
+      const firstKeepSessionId = Number(options.current.sessions[0]?.id);
+      const secondOccurrenceId = options.candidates[0]?.id || '';
+      setSplitWizard({
+        options,
+        firstKeepSessionId,
+        secondOccurrenceId,
+        allowCapacityOverride: false
+      });
+      closeEditor();
+    } catch (error) {
+      setNotice({ type: 'error', text: error.body?.message || error.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function confirmBalancedSplit() {
+    if (!splitWizard?.secondOccurrenceId || !splitWizard?.firstKeepSessionId) return;
+    const current = splitWizard.options.current;
+    const second = splitWizard.options.candidates.find((occurrence) => occurrence.id === splitWizard.secondOccurrenceId);
+    if (!second) return;
+
+    const allSessions = [...current.sessions, ...second.sessions];
+    setSaving(true);
+    setNotice(null);
+    try {
+      await api.balancedSplit(current.sessions[0].id, {
+        firstKeepSessionId: splitWizard.firstKeepSessionId,
+        secondOccurrenceSessionId: second.sessions[0].id,
+        versions: allSessions.map((session) => ({ sessionId: session.id, rowVersion: session.rowVersion })),
+        allowCapacityOverride: Boolean(splitWizard.allowCapacityOverride)
+      });
+      closeSplitWizard();
+      setNotice({ type: 'success', text: 'Kutty bundle split into two balanced full sessions.' });
+      await refreshAll(filters);
+    } catch (error) {
+      const capacityDetails = error.body?.details?.capacityConflicts
+        ?.map((item) => `${item.courseCode}: ${item.studentCount} students / capacity ${item.capacity}`)
+        .join(', ');
+      setNotice({ type: 'error', text: capacityDetails || error.body?.message || error.message });
     } finally {
       setSaving(false);
     }
@@ -851,8 +906,19 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
           onClose={closeEditor}
           onSave={saveDraft}
           onSwapRoom={swapSelectedRoom}
+          onSplit={openBalancedSplit}
           onDelete={deleteSelectedSession}
           days={meta?.days || []}
+        />
+      )}
+
+      {authUser && splitWizard && (
+        <BalancedSplitModal
+          wizard={splitWizard}
+          saving={saving}
+          onChange={(changes) => setSplitWizard((current) => ({ ...current, ...changes }))}
+          onClose={closeSplitWizard}
+          onConfirm={confirmBalancedSplit}
         />
       )}
 
@@ -1101,7 +1167,7 @@ function ActivityPanel({ activity }) {
   );
 }
 
-function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onBatchChange, onClose, onSave, onSwapRoom, onDelete, days }) {
+function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onBatchChange, onClose, onSave, onSwapRoom, onSplit, onDelete, days }) {
   const selectedRoom = rooms.find((room) => String(room.id) === String(draft.roomId));
   const pairedSession = draft.pairedSession;
   const movesPair = Boolean(pairedSession) && (
@@ -1149,6 +1215,9 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
                 <span><strong>{pairedSession.courseCode}</strong>{pairedSession.teacherName || 'Staff TBA'}</span>
               </div>
               <small>Day, time, and room are updated for both staff together. Changing Staff updates only the selected half.</small>
+              <button className="split-bundle-action" type="button" onClick={onSplit} disabled={saving}>
+                <Scissors size={16} /> Split into balanced full sessions
+              </button>
             </section>
           )}
 
@@ -1247,6 +1316,145 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
           <span className="modal-spacer" />
           <button className="secondary-action" onClick={onClose}>Cancel</button>
           <button className="primary-action" onClick={onSave} disabled={saving}>{saving ? <Clock size={17} /> : <Save size={17} />} {saving ? 'Saving' : movesPair ? 'Move Paired Session' : 'Save Changes'}</button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function BalancedSplitModal({ wizard, saving, onChange, onClose, onConfirm }) {
+  const { current, candidates } = wizard.options;
+  const firstKeep = current.sessions.find((session) => Number(session.id) === Number(wizard.firstKeepSessionId));
+  const firstDrop = current.sessions.find((session) => Number(session.id) !== Number(wizard.firstKeepSessionId));
+  const secondOccurrence = candidates.find((occurrence) => occurrence.id === wizard.secondOccurrenceId);
+  const secondKeep = secondOccurrence?.sessions.find((session) =>
+    session.sourceCourseInstanceId === firstDrop?.sourceCourseInstanceId
+  );
+  const secondDrop = secondOccurrence?.sessions.find((session) => Number(session.id) !== Number(secondKeep?.id));
+  const retainedSessions = [firstKeep, secondKeep].filter(Boolean);
+  const capacityConflicts = retainedSessions.filter((session) =>
+    Number(session.studentCount || 0) > 0 && Number(session.capacity || 0) > 0 && Number(session.studentCount) > Number(session.capacity)
+  );
+  const canConfirm = Boolean(firstKeep && firstDrop && secondKeep && secondDrop) &&
+    (!capacityConflicts.length || wizard.allowCapacityOverride);
+
+  return (
+    <div className="modal-backdrop">
+      <section className="edit-modal split-bundle-modal" aria-labelledby="split-bundle-title">
+        <header className="modal-header">
+          <div>
+            <h2 id="split-bundle-title">Split Kutty bundle</h2>
+            <p>{current.sessions.map((session) => session.courseCode).join(' + ')} · Section {current.sessions[0]?.sectionLabel}</p>
+          </div>
+          <button className="close-button" type="button" onClick={onClose} aria-label="Close split dialog"><X size={18} /></button>
+        </header>
+
+        <div className="modal-body split-bundle-body">
+          <section className="split-step">
+            <div className="split-step-heading">
+              <span>1</span>
+              <div>
+                <strong>Choose the full course in this slot</strong>
+                <small>{titleCase(current.day)} · {current.timeLabel} · {current.roomNumber}</small>
+              </div>
+            </div>
+            <div className="split-course-options">
+              {current.sessions.map((session) => (
+                <label className={Number(session.id) === Number(wizard.firstKeepSessionId) ? 'active' : ''} key={session.id}>
+                  <input
+                    type="radio"
+                    name="first-keep-course"
+                    checked={Number(session.id) === Number(wizard.firstKeepSessionId)}
+                    onChange={() => onChange({ firstKeepSessionId: Number(session.id) })}
+                  />
+                  <span>
+                    <strong>{session.courseCode}</strong>
+                    <small>{session.courseName}</small>
+                    <em>{session.teacherName || 'Staff TBA'}</em>
+                  </span>
+                  <b>Keep full 50 min</b>
+                </label>
+              ))}
+            </div>
+          </section>
+
+          <section className="split-step">
+            <div className="split-step-heading">
+              <span>2</span>
+              <div>
+                <strong>Choose the balancing occurrence</strong>
+                <small>{firstDrop ? `${firstDrop.courseCode} will automatically be retained there.` : 'Select the first course.'}</small>
+              </div>
+            </div>
+            {candidates.length ? (
+              <div className="split-occurrence-options">
+                {candidates.map((occurrence) => {
+                  const keep = occurrence.sessions.find((session) =>
+                    session.sourceCourseInstanceId === firstDrop?.sourceCourseInstanceId
+                  );
+                  return (
+                    <label className={occurrence.id === wizard.secondOccurrenceId ? 'active' : ''} key={occurrence.id}>
+                      <input
+                        type="radio"
+                        name="second-occurrence"
+                        checked={occurrence.id === wizard.secondOccurrenceId}
+                        onChange={() => onChange({ secondOccurrenceId: occurrence.id })}
+                      />
+                      <span>
+                        <strong>{titleCase(occurrence.day)} · {occurrence.timeLabel}</strong>
+                        <small>{occurrence.roomNumber} · {occurrence.sessions.map((session) => session.courseCode).join(' + ')}</small>
+                      </span>
+                      <b>{keep ? `Keep ${keep.courseCode}` : 'Unavailable'}</b>
+                    </label>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="split-empty-state">
+                <AlertTriangle size={18} /> No other occurrence of this exact course pair is available in the section.
+              </div>
+            )}
+          </section>
+
+          {firstKeep && secondKeep && (
+            <section className="split-confirmation">
+              <strong>Balanced result</strong>
+              <div>
+                <span>{titleCase(current.day)} · {current.timeLabel}</span>
+                <b>{firstKeep.courseCode}</b>
+                <small>Full 50 minutes · {firstKeep.teacherName || 'Staff TBA'} · {firstKeep.roomNumber}</small>
+              </div>
+              <ArrowLeftRight size={18} />
+              <div>
+                <span>{titleCase(secondOccurrence.day)} · {secondOccurrence.timeLabel}</span>
+                <b>{secondKeep.courseCode}</b>
+                <small>Full 50 minutes · {secondKeep.teacherName || 'Staff TBA'} · {secondKeep.roomNumber}</small>
+              </div>
+              <p>{firstDrop.courseCode} is removed from the first slot and {secondDrop.courseCode} is removed from the balancing slot.</p>
+            </section>
+          )}
+
+          {capacityConflicts.length > 0 && (
+            <label className="split-capacity-warning">
+              <input
+                type="checkbox"
+                checked={Boolean(wizard.allowCapacityOverride)}
+                onChange={(event) => onChange({ allowCapacityOverride: event.target.checked })}
+              />
+              <span>
+                <strong>Confirm room capacity override</strong>
+                <small>{capacityConflicts.map((session) => `${session.courseCode}: ${session.studentCount} students in capacity ${session.capacity}`).join(' · ')}</small>
+              </span>
+            </label>
+          )}
+        </div>
+
+        <footer className="modal-actions">
+          <button className="secondary-action" type="button" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="primary-action" type="button" onClick={onConfirm} disabled={!canConfirm || saving}>
+            {saving ? <Clock size={17} /> : <Scissors size={17} />}
+            {saving ? 'Splitting' : 'Confirm balanced split'}
+          </button>
         </footer>
       </section>
     </div>

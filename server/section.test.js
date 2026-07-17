@@ -6,8 +6,10 @@ import {
   getSectionKey,
   getSectionLabel,
   getSourceCourseInstanceKey,
+  hasSamePairedCourseSet,
   isApprovedDbmsOopsOverlap,
-  isPairedSectionSession
+  isPairedSectionSession,
+  isReciprocalPairedOccurrence
 } from './section.js';
 
 test('derives section identity from the suffixed source instance key', () => {
@@ -48,4 +50,32 @@ test('does not apply section behavior to fifth or seventh semester records', () 
     assert.equal(getSectionLabel(session), null);
     assert.equal(getSectionKey(session), null);
   }
+});
+
+test('recognizes reciprocal occurrences of the same balanced course pair', () => {
+  const first = {
+    semester: 3,
+    department: 'CSE',
+    sectionIndex: 1,
+    isCoScheduled: true,
+    sourceCourseInstanceId: 'course-a__s1',
+    partnerCourseInstanceId: 'course-b__s1',
+    day: 'tuesday',
+    startMinute: 480,
+    endMinute: 530
+  };
+  const second = {
+    ...first,
+    sourceCourseInstanceId: 'course-b__s1',
+    partnerCourseInstanceId: 'course-a__s1'
+  };
+
+  assert.equal(hasSamePairedCourseSet(first, second), true);
+  assert.equal(isReciprocalPairedOccurrence(first, second), true);
+  assert.equal(isReciprocalPairedOccurrence(first, { ...second, day: 'wednesday' }), false);
+  assert.equal(hasSamePairedCourseSet(first, {
+    ...second,
+    sourceCourseInstanceId: 'course-c__s1',
+    partnerCourseInstanceId: 'course-a__s1'
+  }), false);
 });

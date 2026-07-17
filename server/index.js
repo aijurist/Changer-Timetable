@@ -16,11 +16,13 @@ import { getRoomCapacity, isPreferredLabRoom } from './roomRules.js';
 import { labCsvHeaders, theoryCsvHeaders, toCsv, toLegacySession } from './legacyExport.js';
 import {
   getPartnerCourseInstanceKey,
+  hasSamePairedCourseSet,
   getSectionIndex,
   getSectionKey,
   getSectionLabel,
   getSourceCourseInstanceKey,
-  isPairedSectionSession
+  isPairedSectionSession,
+  isReciprocalPairedOccurrence
 } from './section.js';
 import { normalizeDay } from './time.js';
 import { createAuthRouter, requireAuth } from './auth.js';
@@ -104,6 +106,16 @@ const roomSwapSchema = z.object({
   otherSessionId: z.coerce.number().int().positive(),
   rowVersion: z.coerce.number().int().positive().optional(),
   updatedBy: z.string().trim().max(120).optional()
+});
+
+const balancedSplitSchema = z.object({
+  firstKeepSessionId: z.coerce.number().int().positive(),
+  secondOccurrenceSessionId: z.coerce.number().int().positive(),
+  versions: z.array(z.object({
+    sessionId: z.coerce.number().int().positive(),
+    rowVersion: z.coerce.number().int().positive()
+  })).length(4),
+  allowCapacityOverride: z.boolean().optional()
 });
 
 function boundedInt(value, fallback, min, max) {
@@ -268,6 +280,186 @@ app.get('/api/sessions/:id', async (req, res, next) => {
       ...session,
       pairedSession: pairedRow ? mapSessionRow(pairedRow) : null
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/sessions/:id/balanced-split-options', adminOnly, async (req, res, next) => {
+  try {
+    const sessionId = positiveId(req.params.id, 'session id');
+    const context = await getBalancedSplitContext(pool, sessionId);
+    res.json({
+      current: mapBalancedOccurrence(context.current),
+      candidates: context.candidates.map(mapBalancedOccurrence)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/sessions/:id/balanced-split', adminOnly, async (req, res, next) => {
+  try {
+    const sessionId = positiveId(req.params.id, 'session id');
+    const payload = balancedSplitSchema.parse(req.body);
+    const updatedBy = req.auth.user.email;
+
+    const result = await withTransaction(async (client) => {
+      const initial = await getBalancedSplitContext(client, sessionId);
+      const secondOccurrence = initial.candidates.find((occurrence) =>
+        occurrence.some((row) => Number(row.id) === payload.secondOccurrenceSessionId)
+      );
+      if (!secondOccurrence) {
+        throw new HttpError(409, 'The second occurrence is no longer available. Refresh the split options and try again.');
+      }
+
+      const ids = [...new Set([...initial.current, ...secondOccurrence].map((row) => Number(row.id)))].sort((a, b) => a - b);
+      if (ids.length !== 4) throw new HttpError(409, 'A balanced split requires two distinct paired occurrences.');
+
+      const locked = await client.query(
+        'SELECT * FROM sessions WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE',
+        [ids]
+      );
+      if (locked.rowCount !== 4) throw new HttpError(409, 'One of the paired sessions no longer exists. Refresh and try again.');
+
+      const byId = new Map(locked.rows.map((row) => [Number(row.id), row]));
+      const firstRows = initial.current.map((row) => byId.get(Number(row.id)));
+      const secondRows = secondOccurrence.map((row) => byId.get(Number(row.id)));
+      if (firstRows.some((row) => !row) || secondRows.some((row) => !row)) {
+        throw new HttpError(409, 'The paired sessions changed while the split was being prepared.');
+      }
+      if (firstRows.some((row) => row.status !== 'active') || secondRows.some((row) => row.status !== 'active')) {
+        throw new HttpError(409, 'One of the paired sessions is no longer active. Refresh and try again.');
+      }
+      if (!isReciprocalPairedOccurrence(firstRows[0], firstRows[1]) || !isReciprocalPairedOccurrence(secondRows[0], secondRows[1])) {
+        throw new HttpError(409, 'The selected sessions are no longer valid 25 + 25 pairs. Refresh and try again.');
+      }
+      if (!hasSamePairedCourseSet(firstRows[0], secondRows[0])) {
+        throw new HttpError(409, 'Both occurrences must contain the same two courses.');
+      }
+
+      const versions = new Map(payload.versions.map((entry) => [entry.sessionId, entry.rowVersion]));
+      if (versions.size !== 4 || ids.some((id) => !versions.has(id))) {
+        throw new HttpError(400, 'Row versions are required for all four sessions.');
+      }
+      const staleRows = locked.rows.filter((row) => versions.get(Number(row.id)) !== Number(row.row_version));
+      if (staleRows.length) {
+        throw new HttpError(409, 'One of these sessions was updated by someone else. Refresh and try again.', {
+          staleSessionIds: staleRows.map((row) => String(row.id))
+        });
+      }
+
+      const firstKeep = firstRows.find((row) => Number(row.id) === payload.firstKeepSessionId);
+      if (!firstKeep) throw new HttpError(400, 'Choose one course from the first occurrence to retain.');
+      const firstDrop = firstRows.find((row) => Number(row.id) !== Number(firstKeep.id));
+      const secondKeep = secondRows.find((row) => getSourceCourseInstanceKey(row) === getSourceCourseInstanceKey(firstDrop));
+      const secondDrop = secondRows.find((row) => Number(row.id) !== Number(secondKeep?.id));
+      if (!firstDrop || !secondKeep || !secondDrop) {
+        throw new HttpError(409, 'The complementary course could not be resolved from the second occurrence.');
+      }
+
+      const retainedRows = [firstKeep, secondKeep];
+      const archivedRows = [firstDrop, secondDrop];
+      const capacityConflicts = retainedRows
+        .filter((row) => Number(row.student_count || 0) > 0 && Number(row.capacity || 0) > 0 && Number(row.student_count) > Number(row.capacity))
+        .map((row) => ({
+          sessionId: String(row.id),
+          courseCode: row.course_code,
+          studentCount: Number(row.student_count),
+          capacity: Number(row.capacity)
+        }));
+      if (capacityConflicts.length && !payload.allowCapacityOverride) {
+        throw new HttpError(409, 'A retained full session exceeds its room capacity. Confirm the capacity override to continue.', {
+          capacityConflicts
+        });
+      }
+
+      const requestPayload = {
+        action: 'balanced_bundle_split',
+        firstOccurrenceSessionId: sessionId,
+        firstKeepSessionId: Number(firstKeep.id),
+        secondOccurrenceSessionId: payload.secondOccurrenceSessionId,
+        secondKeepSessionId: Number(secondKeep.id),
+        archivedSessionIds: archivedRows.map((row) => Number(row.id)),
+        allowCapacityOverride: Boolean(payload.allowCapacityOverride)
+      };
+      const request = await client.query(
+        `INSERT INTO edit_requests (session_id, requested_by, payload)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [sessionId, updatedBy, requestPayload]
+      );
+      const requestId = request.rows[0].id;
+      const beforePayloads = new Map();
+      for (const id of ids) beforePayloads.set(id, await serializeSession(client, id));
+
+      await client.query("SET LOCAL app.seed_mode = 'on'");
+      await client.query(
+        `UPDATE sessions
+         SET status = 'archived',
+             is_co_scheduled = false,
+             co_schedule_id = NULL,
+             co_schedule_group_size = NULL,
+             co_schedule_partner_teachers = NULL,
+             co_schedule_info = 'Removed by balanced Kutty bundle split',
+             partner_instance_id = NULL,
+             partner_course_instance_key = NULL,
+             partner_group = NULL,
+             course_code_display = course_code,
+             raw_payload = (raw_payload - 'partner_instance_id') || jsonb_build_object('is_co_scheduled', false),
+             row_version = row_version + 1,
+             updated_by = $2
+         WHERE id = ANY($1::bigint[])`,
+        [archivedRows.map((row) => Number(row.id)), updatedBy]
+      );
+      await client.query(
+        `UPDATE sessions
+         SET is_co_scheduled = false,
+             co_schedule_id = NULL,
+             co_schedule_group_size = NULL,
+             co_schedule_partner_teachers = NULL,
+             co_schedule_info = 'Full 50-minute session from balanced Kutty bundle split',
+             partner_instance_id = NULL,
+             partner_course_instance_key = NULL,
+             partner_group = NULL,
+             course_code_display = course_code,
+             raw_payload = (raw_payload - 'partner_instance_id') || jsonb_build_object('is_co_scheduled', false),
+             allow_capacity_override = allow_capacity_override OR $3,
+             row_version = row_version + 1,
+             updated_by = $2
+         WHERE id = ANY($1::bigint[])`,
+        [retainedRows.map((row) => Number(row.id)), updatedBy, Boolean(payload.allowCapacityOverride)]
+      );
+
+      const afterPayloads = new Map();
+      for (const id of ids) afterPayloads.set(id, await serializeSession(client, id));
+      for (const id of ids) {
+        await client.query(
+          `INSERT INTO session_audit_log (session_id, edit_request_id, changed_by, before_payload, after_payload)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [id, requestId, updatedBy, beforePayloads.get(id), afterPayloads.get(id)]
+        );
+      }
+      await client.query(
+        `UPDATE edit_requests
+         SET status = 'applied', result = $2, completed_at = now()
+         WHERE id = $1`,
+        [requestId, {
+          action: 'balanced_bundle_split',
+          retainedSessionIds: retainedRows.map((row) => String(row.id)),
+          archivedSessionIds: archivedRows.map((row) => String(row.id)),
+          capacityOverrides: capacityConflicts
+        }]
+      );
+
+      return {
+        retainedSessions: retainedRows.map((row) => afterPayloads.get(Number(row.id))),
+        archivedSessionIds: archivedRows.map((row) => String(row.id)),
+        editRequestId: requestId
+      };
+    });
+
+    res.json({ success: true, ...result });
   } catch (error) {
     next(error);
   }
@@ -1325,6 +1517,7 @@ function mapSessionRow(row) {
     coScheduleInfo: row.co_schedule_info,
     partnerGroup: row.partner_group,
     capacityInfo: row.capacity_info,
+    status: row.status,
     rowVersion: row.row_version,
     updatedAt: row.updated_at,
     updatedBy: row.updated_by
@@ -1403,6 +1596,66 @@ async function findPairedOccurrence(clientOrPool, session, forUpdate = false) {
     [session.id, session.department, partnerKey, sourceKey, session.day, session.start_minute, session.end_minute]
   );
   return result.rows[0] || null;
+}
+
+async function getBalancedSplitContext(clientOrPool, sessionId) {
+  const selectedResult = await clientOrPool.query(`${sessionSelectSql()} WHERE s.id = $1`, [sessionId]);
+  if (!selectedResult.rowCount) throw new HttpError(404, 'Session not found');
+  const selected = selectedResult.rows[0];
+  if (selected.status !== 'active') throw new HttpError(409, 'This session is no longer active.');
+  if (!isPairedSectionSession(selected)) {
+    throw new HttpError(409, 'Only active Semester 3 paired 25 + 25 sessions can be split.');
+  }
+
+  const sourceKey = getSourceCourseInstanceKey(selected);
+  const partnerKey = getPartnerCourseInstanceKey(selected);
+  const sectionIndex = getSectionIndex(selected);
+  const pairRows = await clientOrPool.query(
+    `${sessionSelectSql()}
+     WHERE s.status = 'active'
+       AND s.semester = 3
+       AND s.department = $1
+       AND s.section_index = $2
+       AND s.is_co_scheduled = true
+       AND (
+         (s.source_course_instance_key = $3 AND s.partner_course_instance_key = $4)
+         OR (s.source_course_instance_key = $4 AND s.partner_course_instance_key = $3)
+       )
+     ORDER BY coalesce(wd.day_order, 99), s.start_minute, s.id`,
+    [selected.department, sectionIndex, sourceKey, partnerKey]
+  );
+  const occurrences = groupReciprocalOccurrences(pairRows.rows);
+  const current = occurrences.find((occurrence) => occurrence.some((row) => Number(row.id) === Number(sessionId)));
+  if (!current) {
+    throw new HttpError(409, 'The other half of this 25 + 25 session could not be found. Refresh the timetable and try again.');
+  }
+  return {
+    current,
+    candidates: occurrences.filter((occurrence) => occurrence !== current)
+  };
+}
+
+function groupReciprocalOccurrences(rows) {
+  const unused = [...rows];
+  const occurrences = [];
+  while (unused.length) {
+    const first = unused.shift();
+    const partnerIndex = unused.findIndex((candidate) => isReciprocalPairedOccurrence(first, candidate));
+    if (partnerIndex < 0) continue;
+    occurrences.push([first, unused.splice(partnerIndex, 1)[0]]);
+  }
+  return occurrences;
+}
+
+function mapBalancedOccurrence(rows) {
+  const sessions = rows.map(mapSessionRow).sort((left, right) => String(left.courseCode).localeCompare(String(right.courseCode)));
+  return {
+    id: sessions.map((session) => String(session.id)).sort((a, b) => Number(a) - Number(b)).join(':'),
+    day: sessions[0].day,
+    timeLabel: sessions[0].timeLabel,
+    roomNumber: sessions[0].roomNumber,
+    sessions
+  };
 }
 
 function mapActivityRow(row) {
