@@ -29,6 +29,14 @@ import { normalizeDay } from './time.js';
 import { createAuthRouter, requireAuth } from './auth.js';
 import { RESTORE_SESSION_SQL, restoreSessionParameters, sessionStateFromAuditSnapshot } from './restore.js';
 import { resolveSwapSessions } from './roomSwap.js';
+import {
+  createTemporarySectionOverlap,
+  getTemporaryConflictSessionIds,
+  lockTemporarySectionOverlaps,
+  mapTemporaryOverlap,
+  reconcileTemporarySectionOverlaps,
+  resolveSatisfiedTemporaryOverlaps
+} from './temporaryOverlaps.js';
 
 const app = express();
 if (config.nodeEnv === 'production') app.set('trust proxy', 1);
@@ -80,6 +88,7 @@ const sessionPatchSchema = z.object({
 
 const sessionCreateSchema = z.object({
   scheduleType: z.enum(['theory', 'lab']),
+  courseInstanceId: z.coerce.number().int().positive().optional(),
   courseCode: z.string().trim().min(1).max(80),
   courseName: z.string().trim().min(1).max(240),
   sessionType: z.string().trim().max(120).optional(),
@@ -128,6 +137,10 @@ function boundedInt(value, fallback, min, max) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(Math.max(Math.trunc(parsed), min), max);
+}
+
+function nullableNumber(value) {
+  return value === null || value === undefined ? null : Number(value);
 }
 
 function positiveId(value, label = 'id') {
@@ -289,6 +302,41 @@ app.get('/api/sessions', async (req, res, next) => {
 
     const mapper = compact ? mapSessionListRow : mapSessionRow;
     res.json({ rows: result.rows.map(mapper), total: countResult.rows[0].total, limit, offset });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/courses', adminOnly, async (_req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT min(ci.id)::text AS id,
+              ci.course_code,
+              ci.course_name,
+              ci.department,
+              ci.semester,
+              max(ci.lecture_hours) AS lecture_hours,
+              max(ci.tutorial_hours) AS tutorial_hours,
+              max(ci.practical_hours) AS practical_hours,
+              bool_or(coalesce(ci.lecture_hours, 0) > 0 OR coalesce(ci.tutorial_hours, 0) > 0) AS has_theory,
+              bool_or(coalesce(ci.practical_hours, 0) > 0) AS has_lab
+       FROM course_instances ci
+       WHERE ci.course_code IS NOT NULL AND ci.course_name IS NOT NULL
+       GROUP BY ci.course_code, ci.course_name, ci.department, ci.semester
+       ORDER BY ci.department, ci.semester, ci.course_code, ci.course_name`
+    );
+    res.json(result.rows.map((row) => ({
+      id: row.id,
+      courseCode: row.course_code,
+      courseName: row.course_name,
+      department: row.department,
+      semester: row.semester,
+      lectureHours: nullableNumber(row.lecture_hours),
+      tutorialHours: nullableNumber(row.tutorial_hours),
+      practicalHours: nullableNumber(row.practical_hours),
+      hasTheory: row.has_theory,
+      hasLab: row.has_lab
+    })));
   } catch (error) {
     next(error);
   }
@@ -709,6 +757,43 @@ app.get('/api/activity', adminOnly, async (req, res, next) => {
   }
 });
 
+app.get('/api/temporary-overlaps', adminOnly, async (_req, res, next) => {
+  try {
+    await runTemporaryOverlapSweep();
+    const result = await pool.query(
+      `SELECT tso.*,
+              s.course_code, s.course_name, s.department, s.semester,
+              s.section_index, s.day, s.time_label,
+              conflict_courses.course_codes
+       FROM temporary_section_overlaps tso
+       JOIN edit_requests er ON er.id = tso.source_edit_request_id
+       LEFT JOIN sessions s ON s.id = er.session_id
+       LEFT JOIN LATERAL (
+         SELECT array_agg(DISTINCT conflict.course_code ORDER BY conflict.course_code) AS course_codes
+         FROM sessions conflict
+         WHERE conflict.id = ANY(tso.conflict_session_ids)
+       ) conflict_courses ON true
+       WHERE tso.status IN ('active', 'failed')
+       ORDER BY CASE tso.status WHEN 'failed' THEN 0 ELSE 1 END, tso.expires_at
+       LIMIT 100`
+    );
+    res.json(result.rows.map((row) => ({
+      ...mapTemporaryOverlap(row),
+      courseCode: row.course_code,
+      courseName: row.course_name,
+      department: row.department,
+      semester: row.semester,
+      sectionIndex: row.section_index,
+      sectionLabel: getSectionLabel(row),
+      day: row.day,
+      timeLabel: row.time_label,
+      conflictCourseCodes: row.course_codes || []
+    })));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/activity/:id/restore', adminOnly, async (req, res, next) => {
   try {
     const sourceRequestId = z.string().uuid().parse(req.params.id);
@@ -879,6 +964,22 @@ app.post('/api/sessions', adminOnly, async (req, res, next) => {
       const teacher = await client.query('SELECT * FROM teachers WHERE id = $1', [payload.teacherId]);
       if (!teacher.rowCount) throw new HttpError(400, 'Selected teacher does not exist');
 
+      let catalogCourse = null;
+      if (payload.courseInstanceId) {
+        const course = await client.query('SELECT * FROM course_instances WHERE id = $1', [payload.courseInstanceId]);
+        if (!course.rowCount) throw new HttpError(400, 'Selected catalog course does not exist');
+        catalogCourse = course.rows[0];
+        const matchesSelection = catalogCourse.course_code === payload.courseCode &&
+          catalogCourse.course_name === payload.courseName &&
+          catalogCourse.department === payload.department &&
+          Number(catalogCourse.semester) === Number(payload.semester);
+        if (!matchesSelection) throw new HttpError(409, 'The selected catalog course changed. Choose it again and retry.');
+        const supportsType = payload.scheduleType === 'lab'
+          ? Number(catalogCourse.practical_hours || 0) > 0
+          : Number(catalogCourse.lecture_hours || 0) > 0 || Number(catalogCourse.tutorial_hours || 0) > 0;
+        if (!supportsType) throw new HttpError(409, `${payload.courseCode} is not configured for ${payload.scheduleType} sessions.`);
+      }
+
       const slot = await resolveSlot(client, payload.scheduleType, payload.slotKey);
       if (!slot) throw new HttpError(400, 'Selected slot does not exist');
 
@@ -898,7 +999,7 @@ app.post('/api/sessions', adminOnly, async (req, res, next) => {
       const nextSession = {
         schedule_type: payload.scheduleType,
         source_file: 'manual',
-        course_instance_id: null,
+        course_instance_id: catalogCourse?.id || null,
         course_code: payload.courseCode,
         course_code_display: formatCourseCodeDisplay(payload.scheduleType, payload.courseCode, {
           is_batched: payload.isBatched ?? false,
@@ -1067,6 +1168,7 @@ app.delete('/api/sessions/:id', adminOnly, async (req, res, next) => {
       );
       const requestId = request.rows[0].id;
 
+      await lockTemporarySectionOverlaps(client, [sessionId]);
       const currentResult = await client.query('SELECT * FROM sessions WHERE id = $1 FOR UPDATE', [sessionId]);
       if (!currentResult.rowCount) throw new HttpError(404, 'Session not found');
       const current = currentResult.rows[0];
@@ -1100,6 +1202,7 @@ app.delete('/api/sessions/:id', adminOnly, async (req, res, next) => {
          WHERE id = $1`,
         [requestId, { action: 'delete' }]
       );
+      await resolveSatisfiedTemporaryOverlaps(client, [sessionId], requestId);
 
       return {
         status: 200,
@@ -1147,6 +1250,11 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
           }
         };
       }
+      await lockTemporarySectionOverlaps(client, [
+        sessionId,
+        pairLookup?.id,
+        payload.batchConflictSessionId
+      ]);
       const lockedRows = await client.query(
         `SELECT * FROM sessions WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE`,
         [[sessionId, pairLookup?.id, payload.batchConflictSessionId].filter(Boolean)]
@@ -1460,6 +1568,21 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
           [batchConflictSession.id, requestId, payload.updatedBy || null, batchConflictBeforePayload, batchConflictAfterPayload]
         );
       }
+      const affectedSessionIds = [
+        sessionId,
+        movesPair ? paired.id : null,
+        batchConflictSession?.id
+      ].filter(Boolean).map(Number);
+      await resolveSatisfiedTemporaryOverlaps(client, affectedSessionIds, requestId);
+      const temporaryConflictSessionIds = getTemporaryConflictSessionIds(validation.warnings);
+      const temporaryOverlap = temporaryConflictSessionIds.length
+        ? await createTemporarySectionOverlap(client, {
+            sourceEditRequestId: requestId,
+            sessionIds: affectedSessionIds,
+            conflictSessionIds: temporaryConflictSessionIds,
+            createdBy: payload.updatedBy
+          })
+        : null;
       await client.query(
         `UPDATE edit_requests
          SET status = 'applied', result = $2, completed_at = now()
@@ -1467,7 +1590,8 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
         [requestId, {
           warnings: validation.warnings,
           pairedSessionId: movesPair ? String(paired.id) : null,
-          batchSwappedSessionId: batchConflictSession ? String(batchConflictSession.id) : null
+          batchSwappedSessionId: batchConflictSession ? String(batchConflictSession.id) : null,
+          temporaryOverlap
         }]
       );
 
@@ -1480,6 +1604,7 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
           pairedSessionId: movesPair ? String(paired.id) : null,
           batchSwappedSessionId: batchConflictSession ? String(batchConflictSession.id) : null,
           warnings: validation.warnings,
+          temporaryOverlap,
           editRequestId: requestId
         }
       };
@@ -2035,9 +2160,10 @@ function mapActivityRow(row) {
   const action = payload.action || (payload.courseCode && payload.scheduleType ? 'create' : 'update');
   const snapshot = row.audit_after_payload || row.audit_before_payload || {};
   const messages = [
+    result.temporaryOverlapFailure,
     ...(result.conflicts || []).map((item) => item.message || item.type).filter(Boolean),
     ...(result.warnings || []).map((item) => item.message || item.type).filter(Boolean)
-  ];
+  ].filter(Boolean);
 
   return {
     id: row.id,
@@ -2304,6 +2430,21 @@ async function getConflictCounts(client = pool) {
   };
 }
 
+let temporaryOverlapSweepPromise = null;
+function runTemporaryOverlapSweep() {
+  if (!temporaryOverlapSweepPromise) {
+    temporaryOverlapSweepPromise = reconcileTemporarySectionOverlaps(pool, { serializeSession })
+      .catch((error) => {
+        console.error('Temporary overlap reconciliation failed:', error);
+        throw error;
+      })
+      .finally(() => {
+        temporaryOverlapSweepPromise = null;
+      });
+  }
+  return temporaryOverlapSweepPromise;
+}
+
 if (existsSync(config.clientDist)) {
   app.use(express.static(config.clientDist));
   app.get(/.*/, (_req, res) => {
@@ -2328,3 +2469,9 @@ app.use((error, _req, res, _next) => {
 app.listen(config.port, () => {
   console.log(`Changer API listening on http://localhost:${config.port}`);
 });
+
+const temporaryOverlapTimer = setInterval(() => {
+  runTemporaryOverlapSweep().catch(() => {});
+}, 60_000);
+temporaryOverlapTimer.unref();
+setTimeout(() => runTemporaryOverlapSweep().catch(() => {}), 5_000).unref();

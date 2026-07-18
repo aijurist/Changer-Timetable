@@ -30,6 +30,7 @@ export const api = {
   logout: () => request('/api/auth/logout', { method: 'POST' }),
   meta: () => request('/api/meta'),
   sessions: (params) => request(`/api/sessions?${new URLSearchParams(cleanParams(params))}`),
+  courses: () => request('/api/courses'),
   session: (id) => request(`/api/sessions/${id}`),
   balancedSplitOptions: (id) => request(`/api/sessions/${id}/balanced-split-options`),
   balancedSplit: (id, payload) => request(`/api/sessions/${id}/balanced-split`, {
@@ -40,6 +41,7 @@ export const api = {
   teachers: (params) => request(`/api/teachers?${new URLSearchParams(cleanParams(params))}`),
   conflicts: () => request('/api/conflicts?limit=100'),
   activity: (params = {}) => request(`/api/activity?${new URLSearchParams(cleanParams(params))}`),
+  temporaryOverlaps: () => request('/api/temporary-overlaps'),
   restoreActivity: (id) => request(`/api/activity/${id}/restore`, { method: 'POST' }),
   createSession: (payload) => request('/api/sessions', {
     method: 'POST',

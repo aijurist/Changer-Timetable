@@ -748,6 +748,89 @@ input:focus,
   font-size: 0.86rem;
 }
 
+.temporary-overlap-status {
+  margin-bottom: 16px;
+  border: 1px solid #f3c267;
+  border-left: 4px solid #d99515;
+  border-radius: 6px;
+  background: #fffaf0;
+  color: #5f410b;
+}
+
+.temporary-overlap-status.has-failure {
+  border-color: #ef9a9a;
+  border-left-color: #c73e3e;
+  background: #fff6f6;
+}
+
+.temporary-overlap-status > header,
+.temporary-overlap-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 9px 12px;
+}
+
+.temporary-overlap-status > header {
+  border-bottom: 1px solid rgba(126, 85, 10, 0.15);
+}
+
+.temporary-overlap-status > header span,
+.temporary-overlap-failed {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.temporary-overlap-status > header small {
+  color: #73591f;
+}
+
+.temporary-overlap-item + .temporary-overlap-item {
+  border-top: 1px solid rgba(126, 85, 10, 0.12);
+}
+
+.temporary-overlap-item > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.temporary-overlap-item > div span {
+  color: #776238;
+  font-size: 0.82rem;
+}
+
+.temporary-overlap-countdown,
+.temporary-overlap-failed {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: #f8dfaa;
+  color: #684608;
+  font-size: 0.79rem;
+  font-weight: 700;
+}
+
+.temporary-overlap-failed {
+  background: #f8d7d7;
+  color: #9b2525;
+}
+
+.temporary-overlap-status > button {
+  margin: 0 12px 10px auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #d97b7b;
+  border-radius: 5px;
+  padding: 6px 9px;
+  background: #fff;
+  color: #922c2c;
+  cursor: pointer;
+}
+
 .conflict-strip {
   display: flex;
   flex-wrap: wrap;
@@ -2165,6 +2248,11 @@ input:focus,
   .toast {
     top: 64px;
     right: 12px;
+  }
+
+  .temporary-overlap-item {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .swap-room-panel {

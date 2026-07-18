@@ -197,6 +197,8 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     setMeta,
     sessions,
     setSessions,
+    courseCatalog,
+    setCourseCatalog,
     total,
     setTotal,
     filters,
@@ -234,6 +236,8 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     setActivityDepartment,
     activityDepartments,
     setActivityDepartments,
+    temporaryOverlaps,
+    setTemporaryOverlaps,
     restoringLogId,
     setRestoringLogId,
     lastLoadedAt,
@@ -273,6 +277,14 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     }
   }
 
+  async function loadCourseCatalog() {
+    if (!authUser) {
+      setCourseCatalog([]);
+      return;
+    }
+    setCourseCatalog(await api.courses());
+  }
+
   async function loadActivity(pageNumber = activityPage, pageSize = activityPageSize, department = activityDepartment) {
     if (!authUser) {
       setActivity([]);
@@ -290,6 +302,14 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     setActivityDepartments(result.departments || []);
   }
 
+  async function loadTemporaryOverlaps() {
+    if (!authUser) {
+      setTemporaryOverlaps([]);
+      return;
+    }
+    setTemporaryOverlaps(await api.temporaryOverlaps());
+  }
+
   async function refreshActivityLogs() {
     setRefreshing(true);
     try {
@@ -305,7 +325,9 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     try {
       await loadMeta();
       await loadSessions(nextFilters);
+      await loadCourseCatalog();
       await loadActivity();
+      await loadTemporaryOverlaps();
       setLastLoadedAt(new Date());
     } finally {
       setRefreshing(false);
@@ -323,6 +345,30 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     loadActivity(activityPage, activityPageSize, activityDepartment)
       .catch((error) => setNotice({ type: 'error', text: error.body?.message || error.message }));
   }, [authUser?.id, page, activityPage, activityPageSize, activityDepartment]);
+
+  useEffect(() => {
+    if (!authUser || !temporaryOverlaps.some((item) => item.status === 'active')) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const previous = useChangerStore.getState().temporaryOverlaps;
+        const next = await api.temporaryOverlaps();
+        setTemporaryOverlaps(next);
+        const nextById = new Map(next.map((item) => [item.id, item]));
+        const completed = previous.filter((item) => item.status === 'active' && !nextById.has(item.id));
+        const failed = next.find((item) => item.status === 'failed' && previous.some((old) => old.id === item.id && old.status === 'active'));
+        if (completed.length || failed) {
+          await Promise.all([loadMeta(), loadSessions(filters)]);
+          setLastLoadedAt(new Date());
+          setNotice(failed
+            ? { type: 'error', text: failed.failureReason || 'A temporary overlap could not be restored automatically. Open Logs to review it.' }
+            : { type: 'success', text: 'Temporary overlap completed or expired. The timetable has been refreshed.' });
+        }
+      } catch (error) {
+        setNotice({ type: 'error', text: error.body?.message || error.message });
+      }
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [authUser?.id, temporaryOverlaps.some((item) => item.status === 'active')]);
 
   useEffect(() => {
     if (!notice) return undefined;
@@ -462,8 +508,8 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     [sessions, selected, draft, slots]
   );
   const createCourses = useMemo(
-    () => createDraft ? getCoursesForSelection(sessions, createDraft) : [],
-    [sessions, createDraft?.department, createDraft?.semester, createDraft?.scheduleType]
+    () => createDraft ? getCoursesForSelection(sessions, courseCatalog, createDraft) : [],
+    [sessions, courseCatalog, createDraft?.department, createDraft?.semester, createDraft?.scheduleType]
   );
   const createDays = useMemo(
     () => createDraft ? getAllowedDays(meta, createDraft.department) : meta?.days || [],
@@ -474,8 +520,8 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     [meta, createDraft?.scheduleType, createDraft?.department]
   );
   const createSemesters = useMemo(
-    () => createDraft ? getSemestersForDepartment(sessions, createDraft.department) : filterValues.semesters,
-    [sessions, createDraft?.department, filterValues.semesters]
+    () => createDraft ? getSemestersForDepartment(sessions, courseCatalog, createDraft.department) : filterValues.semesters,
+    [sessions, courseCatalog, createDraft?.department, filterValues.semesters]
   );
 
   async function selectSession(session) {
@@ -506,6 +552,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
       scheduleType,
       courseCode: '',
       courseName: '',
+      courseInstanceId: '',
       courseKey: '',
       sessionType: scheduleType === 'lab' ? 'Practical' : 'Lecture',
       sessionNumber: '',
@@ -564,7 +611,8 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
       const confirmed = window.confirm(
         `This creates a temporary overlap for Section ${selected.sectionLabel}.\n\n` +
         `Sessions already in this timeslot:\n${occupants}\n\n` +
-        'Teacher, room, capacity, and lab-batch clashes will still be rejected. Continue?'
+        'Teacher, room, capacity, and lab-batch clashes will still be rejected. ' +
+        'Complete the reciprocal move within 30 minutes or this move will be restored automatically. Continue?'
       );
       if (!confirmed) return;
     }
@@ -597,10 +645,15 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
       });
       const movedPair = Boolean(result.pairedSessionId);
       const swappedBatch = Boolean(result.batchSwappedSessionId);
+      const overlapExpiry = result.temporaryOverlap?.expiresAt
+        ? new Date(result.temporaryOverlap.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : null;
       closeEditor();
       setNotice({
         type: 'success',
-        text: swappedBatch
+        text: overlapExpiry
+          ? `Temporary overlap saved. Complete the reciprocal move by ${overlapExpiry} or this move will be restored.`
+          : swappedBatch
           ? `Batch ${targetBatch} kept and the existing session changed to Batch ${replacementBatch}.`
           : result.warnings?.length
           ? `Saved with ${result.warnings.length} warning(s).`
@@ -769,9 +822,17 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
           Object.assign(next, applyBatchMode(next, 'none', ''));
         }
       }
+      if (key === 'scheduleType') {
+        next.courseKey = '';
+        next.courseInstanceId = '';
+        next.courseCode = '';
+        next.courseName = '';
+        next.teacherId = '';
+      }
       if (key === 'department') {
         next.semester = '';
         next.courseKey = '';
+        next.courseInstanceId = '';
         next.courseCode = '';
         next.courseName = '';
         next.groupName = '';
@@ -780,6 +841,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
       }
       if (key === 'semester') {
         next.courseKey = '';
+        next.courseInstanceId = '';
         next.courseCode = '';
         next.courseName = '';
         next.groupName = '';
@@ -787,8 +849,9 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
         next.teacherId = '';
       }
       if (key === 'courseKey') {
-        const course = getCoursesForSelection(sessions, next).find((item) => item.key === value);
+        const course = getCoursesForSelection(sessions, courseCatalog, next).find((item) => item.key === value);
         if (course) {
+          next.courseInstanceId = course.courseInstanceId || '';
           next.courseCode = course.courseCode;
           next.courseName = course.courseName;
           next.sessionType = course.sessionType || next.sessionType;
@@ -823,6 +886,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     try {
       const result = await api.createSession({
         scheduleType: createDraft.scheduleType,
+        courseInstanceId: createDraft.courseInstanceId || undefined,
         courseCode: createDraft.courseCode,
         courseName: createDraft.courseName,
         sessionType: createDraft.sessionType,
@@ -916,6 +980,13 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
             <span>{notice.text}</span>
             <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notice"><X size={14} /></button>
           </div>
+        )}
+
+        {authUser && temporaryOverlaps.length > 0 && (
+          <TemporaryOverlapStatus
+            items={temporaryOverlaps}
+            onOpenLogs={() => setPage('logs')}
+          />
         )}
 
         {page === 'logs' ? (
@@ -1878,6 +1949,57 @@ function Metric({ label, value, tone }) {
   );
 }
 
+function TemporaryOverlapStatus({ items, onOpenLogs }) {
+  const [now, setNow] = useState(Date.now());
+  const hasActive = items.some((item) => item.status === 'active');
+
+  useEffect(() => {
+    if (!hasActive) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasActive]);
+
+  const failedCount = items.filter((item) => item.status === 'failed').length;
+  return (
+    <section className={`temporary-overlap-status${failedCount ? ' has-failure' : ''}`} aria-live="polite">
+      <header>
+        <span><Clock size={17} /><strong>Temporary section swaps</strong></span>
+        <small>{items.length} open</small>
+      </header>
+      <div className="temporary-overlap-items">
+        {items.map((item) => (
+          <div className="temporary-overlap-item" key={item.id}>
+            <div>
+              <strong>{item.courseCode || 'Session'}{item.sectionLabel ? ` · Section ${item.sectionLabel}` : ''}</strong>
+              <span>
+                {[item.department, titleCase(item.day), item.timeLabel].filter(Boolean).join(' · ')}
+                {item.conflictCourseCodes?.length ? ` · overlaps ${item.conflictCourseCodes.join(', ')}` : ''}
+              </span>
+            </div>
+            {item.status === 'failed' ? (
+              <span className="temporary-overlap-failed"><AlertTriangle size={14} /> Restore needs attention</span>
+            ) : (
+              <span className="temporary-overlap-countdown">Reverts in {formatOverlapCountdown(item.expiresAt, now)}</span>
+            )}
+          </div>
+        ))}
+      </div>
+      {failedCount > 0 && (
+        <button type="button" onClick={onOpenLogs}><History size={15} /> Open logs</button>
+      )}
+    </section>
+  );
+}
+
+function formatOverlapCountdown(expiresAt, now) {
+  const remaining = Math.max(0, new Date(expiresAt).getTime() - now);
+  if (!remaining) return 'now';
+  const totalSeconds = Math.ceil(remaining / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
 function Detail({ label, value }) {
   return (
     <div className="detail">
@@ -2238,18 +2360,44 @@ function getDayPatternLabel(days) {
   return names.join('-');
 }
 
-function getSemestersForDepartment(rows, department) {
+function getSemestersForDepartment(rows, catalog, department) {
   const semesters = new Set();
   for (const session of rows) {
     if ((!department || session.department === department) && session.semester) {
       semesters.add(String(session.semester));
     }
   }
+  for (const course of catalog) {
+    if ((!department || course.department === department) && course.semester) {
+      semesters.add(String(course.semester));
+    }
+  }
   return [...semesters].sort((a, b) => Number(a) - Number(b));
 }
 
-function getCoursesForSelection(rows, draft) {
+function getCoursesForSelection(rows, catalog, draft) {
   const courses = new Map();
+  for (const catalogCourse of catalog) {
+    if (draft.scheduleType === 'lab' ? !catalogCourse.hasLab : !catalogCourse.hasTheory) continue;
+    if (draft.department && catalogCourse.department !== draft.department) continue;
+    if (draft.semester && String(catalogCourse.semester) !== String(draft.semester)) continue;
+    if (!catalogCourse.courseCode || !catalogCourse.courseName) continue;
+
+    const key = `${catalogCourse.courseCode}|${catalogCourse.courseName}`;
+    courses.set(key, {
+      key,
+      courseInstanceId: catalogCourse.id,
+      courseCode: catalogCourse.courseCode,
+      courseName: catalogCourse.courseName,
+      sessionType: draft.scheduleType === 'lab' ? 'Practical' : 'Lecture',
+      lectureHours: catalogCourse.lectureHours,
+      tutorialHours: catalogCourse.tutorialHours,
+      practicalHours: catalogCourse.practicalHours,
+      groupName: '',
+      groupIndex: null,
+      teacherIds: new Set()
+    });
+  }
   for (const session of rows) {
     if (session.scheduleType !== draft.scheduleType) continue;
     if (draft.department && session.department !== draft.department) continue;
@@ -2260,6 +2408,7 @@ function getCoursesForSelection(rows, draft) {
     if (!courses.has(key)) {
       courses.set(key, {
         key,
+        courseInstanceId: session.courseInstanceId || null,
         courseCode: session.courseCode,
         courseName: session.courseName,
         sessionType: session.sessionType,
@@ -2272,6 +2421,7 @@ function getCoursesForSelection(rows, draft) {
       });
     }
     const course = courses.get(key);
+    if (!course.courseInstanceId && session.courseInstanceId) course.courseInstanceId = session.courseInstanceId;
     if (session.teacherId) course.teacherIds.add(session.teacherId);
     if (!course.groupName && session.groupName) course.groupName = session.groupName;
     if (course.groupIndex === null || course.groupIndex === undefined) course.groupIndex = session.groupIndex;
