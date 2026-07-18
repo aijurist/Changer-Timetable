@@ -27,6 +27,7 @@ import {
 } from './section.js';
 import { normalizeDay } from './time.js';
 import { createAuthRouter, requireAuth } from './auth.js';
+import { RESTORE_SESSION_SQL, restoreSessionParameters, sessionStateFromAuditSnapshot } from './restore.js';
 
 const app = express();
 if (config.nodeEnv === 'production') app.set('trust proxy', 1);
@@ -604,7 +605,9 @@ app.get('/api/conflicts', async (req, res, next) => {
 app.get('/api/activity', adminOnly, async (req, res, next) => {
   try {
     const limit = boundedInt(req.query.limit, 20, 1, 100);
-    const result = await pool.query(
+    const offset = boundedInt(req.query.offset, 0, 0, 1000000);
+    const [result, summary] = await Promise.all([
+      pool.query(
       `SELECT
          er.id,
          er.session_id,
@@ -624,17 +627,163 @@ app.get('/api/activity', adminOnly, async (req, res, next) => {
          s.time_label,
          t.name AS teacher_name,
          t.staff_code,
-         r.room_number
+         r.room_number,
+         audit.before_payload AS audit_before_payload,
+         audit.after_payload AS audit_after_payload,
+         audit.audit_count
        FROM edit_requests er
        LEFT JOIN sessions s ON s.id = er.session_id
        LEFT JOIN teachers t ON t.id = s.teacher_id
        LEFT JOIN rooms r ON r.id = s.room_id
+       LEFT JOIN LATERAL (
+         SELECT sal.before_payload, sal.after_payload, (count(*) OVER ())::int AS audit_count
+         FROM session_audit_log sal
+         WHERE sal.edit_request_id = er.id
+         ORDER BY sal.id
+         LIMIT 1
+       ) audit ON true
        ORDER BY er.created_at DESC
-       LIMIT $1`,
-      [limit]
-    );
+       LIMIT $1 OFFSET $2`,
+        [limit, offset]
+      ),
+      pool.query(
+        `SELECT count(*)::int AS total,
+                count(*) FILTER (WHERE status = 'applied')::int AS applied,
+                count(*) FILTER (WHERE status = 'rejected')::int AS rejected,
+                count(*) FILTER (WHERE status = 'pending')::int AS pending,
+                count(*) FILTER (WHERE status = 'failed')::int AS failed
+         FROM edit_requests`
+      )
+    ]);
 
-    res.json(result.rows.map(mapActivityRow));
+    res.json({
+      rows: result.rows.map(mapActivityRow),
+      total: summary.rows[0].total,
+      stats: summary.rows[0],
+      limit,
+      offset
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/activity/:id/restore', adminOnly, async (req, res, next) => {
+  try {
+    const sourceRequestId = z.string().uuid().parse(req.params.id);
+    const updatedBy = req.auth.user.email;
+
+    const result = await withTransaction(async (client) => {
+      const sourceRequest = await client.query('SELECT * FROM edit_requests WHERE id = $1', [sourceRequestId]);
+      if (!sourceRequest.rowCount) throw new HttpError(404, 'Log entry not found.');
+      if (sourceRequest.rows[0].status !== 'applied') {
+        throw new HttpError(409, 'Only successfully applied changes can be restored.');
+      }
+
+      const audits = await client.query(
+        `SELECT id, session_id, before_payload, after_payload
+         FROM session_audit_log
+         WHERE edit_request_id = $1
+         ORDER BY session_id, id`,
+        [sourceRequestId]
+      );
+      if (!audits.rowCount) throw new HttpError(409, 'This older log entry has no restorable session snapshot.');
+
+      const sessionIds = [...new Set(audits.rows.map((row) => Number(row.session_id)))].sort((a, b) => a - b);
+      if (sessionIds.length !== audits.rowCount) {
+        throw new HttpError(409, 'This log contains duplicate snapshots and cannot be restored safely.');
+      }
+      const locked = await client.query(
+        'SELECT * FROM sessions WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE',
+        [sessionIds]
+      );
+      if (locked.rowCount !== sessionIds.length) throw new HttpError(409, 'One or more affected sessions no longer exist.');
+
+      const currentById = new Map(locked.rows.map((row) => [Number(row.id), row]));
+      const roomIds = [...new Set(audits.rows.map((audit) =>
+        Number(audit.before_payload?.roomId || currentById.get(Number(audit.session_id))?.room_id)
+      ).filter(Number.isInteger))];
+      const rooms = roomIds.length
+        ? await client.query('SELECT * FROM rooms WHERE id = ANY($1::int[])', [roomIds])
+        : { rows: [] };
+      const roomById = new Map(rooms.rows.map((row) => [Number(row.id), row]));
+      const targets = audits.rows.map((audit) => {
+        const current = currentById.get(Number(audit.session_id));
+        const roomId = Number(audit.before_payload?.roomId || current.room_id);
+        return {
+          audit,
+          current,
+          target: sessionStateFromAuditSnapshot(current, audit.before_payload, roomById.get(roomId))
+        };
+      });
+
+      const resourceKeys = targets.flatMap(({ current, target }) => buildResourceKeys(current, target));
+      await lockResources(client, [...new Set(resourceKeys)].sort());
+
+      const validation = { conflicts: [], warnings: [] };
+      for (const { target } of targets) {
+        if (target.status !== 'active') continue;
+        const policy = await findDepartmentPolicy(client, target.department);
+        const dayError = validateDepartmentDay(policy, target.day);
+        const rowValidation = await findSessionConflicts(client, target, sessionIds);
+        if (dayError) rowValidation.conflicts.unshift(dayError);
+        validation.conflicts.push(...rowValidation.conflicts);
+        validation.warnings.push(...rowValidation.warnings);
+      }
+      validation.conflicts = dedupeValidationItems(validation.conflicts);
+      validation.warnings = dedupeValidationItems(validation.warnings);
+      if (validation.conflicts.length) {
+        throw new HttpError(409, 'Restore rejected because the previous version now conflicts with the timetable.', validation);
+      }
+
+      const restoreRequest = await client.query(
+        `INSERT INTO edit_requests (session_id, requested_by, payload)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [sessionIds[0], updatedBy, {
+          action: 'restore',
+          sourceEditRequestId: sourceRequestId,
+          affectedSessionIds: sessionIds
+        }]
+      );
+      const restoreRequestId = restoreRequest.rows[0].id;
+      const beforePayloads = new Map();
+      for (const sessionId of sessionIds) beforePayloads.set(sessionId, await serializeSession(client, sessionId));
+
+      await client.query("SET LOCAL app.seed_mode = 'on'");
+      for (const { target } of targets) {
+        await client.query(RESTORE_SESSION_SQL, restoreSessionParameters(target, updatedBy));
+      }
+
+      for (const sessionId of sessionIds) {
+        const afterPayload = await serializeSession(client, sessionId);
+        await client.query(
+          `INSERT INTO session_audit_log (session_id, edit_request_id, changed_by, before_payload, after_payload)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [sessionId, restoreRequestId, updatedBy, beforePayloads.get(sessionId), afterPayload]
+        );
+      }
+      await client.query(
+        `UPDATE edit_requests
+         SET status = 'applied', result = $2, completed_at = now()
+         WHERE id = $1`,
+        [restoreRequestId, {
+          action: 'restore',
+          sourceEditRequestId: sourceRequestId,
+          affectedSessionIds: sessionIds,
+          warnings: validation.warnings
+        }]
+      );
+
+      return {
+        restoreRequestId,
+        sourceEditRequestId: sourceRequestId,
+        restoredSessionIds: sessionIds.map(String),
+        warnings: validation.warnings
+      };
+    });
+
+    res.json({ success: true, ...result });
   } catch (error) {
     next(error);
   }
@@ -1641,6 +1790,9 @@ function mapSessionRow(row) {
     sectionKey: getSectionKey(row),
     dayPattern: row.day_pattern,
     isCoScheduled: row.is_co_scheduled,
+    coScheduleId: row.co_schedule_id,
+    coScheduleGroupSize: row.co_schedule_group_size,
+    coSchedulePartnerTeachers: row.co_schedule_partner_teachers,
     coScheduleInfo: row.co_schedule_info,
     partnerGroup: row.partner_group,
     capacityInfo: row.capacity_info,
@@ -1789,6 +1941,7 @@ function mapActivityRow(row) {
   const payload = row.payload || {};
   const result = row.result || {};
   const action = payload.action || (payload.courseCode && payload.scheduleType ? 'create' : 'update');
+  const snapshot = row.audit_after_payload || row.audit_before_payload || {};
   const messages = [
     ...(result.conflicts || []).map((item) => item.message || item.type).filter(Boolean),
     ...(result.warnings || []).map((item) => item.message || item.type).filter(Boolean)
@@ -1804,20 +1957,53 @@ function mapActivityRow(row) {
     completedAt: row.completed_at,
     message: messages[0] || null,
     messageCount: messages.length,
+    changes: describeAuditChanges(row.audit_before_payload, row.audit_after_payload),
+    affectedSessions: Number(row.audit_count || 0),
+    canRestore: row.status === 'applied' && Number(row.audit_count || 0) > 0,
     session: {
-      courseCode: row.course_code || payload.courseCode || null,
-      courseName: row.course_name || payload.courseName || null,
-      scheduleType: row.schedule_type || payload.scheduleType || null,
-      department: row.department || payload.department || null,
-      semester: row.semester || payload.semester || null,
-      groupName: row.group_name || payload.groupName || null,
-      day: row.day || payload.day || null,
-      timeLabel: row.time_label || null,
-      teacherName: row.teacher_name || null,
-      staffCode: row.staff_code || null,
-      roomNumber: row.room_number || null
+      courseCode: snapshot.courseCode || row.course_code || payload.courseCode || null,
+      courseName: snapshot.courseName || row.course_name || payload.courseName || null,
+      scheduleType: snapshot.scheduleType || row.schedule_type || payload.scheduleType || null,
+      department: snapshot.department || row.department || payload.department || null,
+      semester: snapshot.semester || row.semester || payload.semester || null,
+      groupName: snapshot.groupName || row.group_name || payload.groupName || null,
+      day: snapshot.day || row.day || payload.day || null,
+      timeLabel: snapshot.timeLabel || row.time_label || null,
+      teacherName: snapshot.teacherName || row.teacher_name || null,
+      staffCode: snapshot.staffCode || row.staff_code || null,
+      roomNumber: snapshot.roomNumber || row.room_number || null
     }
   };
+}
+
+function describeAuditChanges(before = null, after = null) {
+  if (!before || !after) return [];
+  if (Object.keys(before).length === 0) return ['Session created'];
+
+  const changes = [];
+  addSnapshotChange(changes, 'Status', before.status, after.status);
+  addSnapshotChange(
+    changes,
+    'Time',
+    [before.day, before.timeLabel].filter(Boolean).join(' '),
+    [after.day, after.timeLabel].filter(Boolean).join(' ')
+  );
+  addSnapshotChange(changes, 'Staff', before.teacherName, after.teacherName);
+  addSnapshotChange(changes, 'Room', before.roomNumber, after.roomNumber);
+  addSnapshotChange(changes, 'Batch', auditBatchLabel(before), auditBatchLabel(after));
+  addSnapshotChange(changes, 'Students', before.studentCount, after.studentCount);
+  return changes;
+}
+
+function addSnapshotChange(changes, label, before, after) {
+  const left = before === null || before === undefined || before === '' ? '-' : String(before);
+  const right = after === null || after === undefined || after === '' ? '-' : String(after);
+  if (left !== right) changes.push(`${label}: ${left} -> ${right}`);
+}
+
+function auditBatchLabel(snapshot) {
+  if (!snapshot?.isBatched) return 'No-Batch';
+  return snapshot.batchLabel || snapshot.batchInfo || (snapshot.batchNumber ? `Batch ${snapshot.batchNumber}` : 'Batched');
 }
 
 function mapRoomRow(row) {

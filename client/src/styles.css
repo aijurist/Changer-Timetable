@@ -1006,6 +1006,74 @@ input:focus,
   white-space: nowrap;
 }
 
+.activity-actions {
+  min-width: 112px;
+  display: grid;
+  justify-items: end;
+  gap: 7px;
+}
+
+.restore-action {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid #b8c9d6;
+  border-radius: 6px;
+  color: #24445d;
+  background: #fff;
+  font-weight: 750;
+}
+
+.restore-action:hover:not(:disabled) {
+  border-color: #5590b8;
+  background: #eef7fc;
+}
+
+.restore-action:disabled {
+  opacity: 0.55;
+}
+
+.activity-main .affected-count {
+  color: #65717d;
+}
+
+.activity-main .activity-change {
+  color: #31556f;
+}
+
+.logs-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  margin: -4px 0 20px;
+}
+
+.logs-pagination > span {
+  margin-right: auto;
+  color: #65717d;
+  font-size: 0.84rem;
+}
+
+.logs-pagination label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #53626f;
+  font-size: 0.82rem;
+}
+
+.logs-pagination select {
+  min-height: 34px;
+  padding: 0 26px 0 8px;
+}
+
+.next-arrow {
+  transform: rotate(180deg);
+}
+
 .status-badge {
   min-width: 68px;
   text-align: center;
@@ -1029,6 +1097,11 @@ input:focus,
 .status-badge.pending {
   background: #fef3c7;
   color: #92400e;
+}
+
+.status-badge.failed {
+  background: #e2e8f0;
+  color: #475569;
 }
 
 .table-wrap {
@@ -2078,5 +2151,21 @@ input:focus,
     align-items: stretch;
     display: flex;
     flex-direction: column;
+  }
+
+  .activity-actions {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .logs-pagination {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .logs-pagination > span {
+    width: 100%;
   }
 }

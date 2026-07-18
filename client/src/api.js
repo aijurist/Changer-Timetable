@@ -39,7 +39,8 @@ export const api = {
   rooms: (params) => request(`/api/rooms?${new URLSearchParams(cleanParams(params))}`),
   teachers: (params) => request(`/api/teachers?${new URLSearchParams(cleanParams(params))}`),
   conflicts: () => request('/api/conflicts?limit=100'),
-  activity: (limit = 20) => request(`/api/activity?limit=${limit}`),
+  activity: (params = {}) => request(`/api/activity?${new URLSearchParams(cleanParams(params))}`),
+  restoreActivity: (id) => request(`/api/activity/${id}/restore`, { method: 'POST' }),
   createSession: (payload) => request('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(payload)

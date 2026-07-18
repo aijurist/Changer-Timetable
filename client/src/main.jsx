@@ -18,6 +18,7 @@ import {
   Mail,
   RefreshCw,
   RotateCcw,
+  Undo2,
   Save,
   Scissors,
   Search,
@@ -221,6 +222,16 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     setConflicts,
     activity,
     setActivity,
+    activityTotal,
+    setActivityTotal,
+    activityStats,
+    setActivityStats,
+    activityPage,
+    setActivityPage,
+    activityPageSize,
+    setActivityPageSize,
+    restoringLogId,
+    setRestoringLogId,
     lastLoadedAt,
     setLastLoadedAt,
     notice,
@@ -258,13 +269,26 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     }
   }
 
-  async function loadActivity() {
+  async function loadActivity(pageNumber = activityPage, pageSize = activityPageSize) {
     if (!authUser) {
       setActivity([]);
+      setActivityTotal(0);
       return;
     }
-    const result = await api.activity(50);
-    setActivity(result);
+    const result = await api.activity({ limit: pageSize, offset: (pageNumber - 1) * pageSize });
+    setActivity(result.rows);
+    setActivityTotal(result.total);
+    setActivityStats(result.stats);
+  }
+
+  async function refreshActivityLogs() {
+    setRefreshing(true);
+    try {
+      await loadActivity(activityPage, activityPageSize);
+      setLastLoadedAt(new Date());
+    } finally {
+      setRefreshing(false);
+    }
   }
 
   async function refreshAll(nextFilters = filters) {
@@ -284,6 +308,12 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
       .catch((error) => setNotice({ type: 'error', text: error.message }))
       .finally(() => setLoading(false));
   }, [authUser?.id]);
+
+  useEffect(() => {
+    if (!authUser || page !== 'logs') return;
+    loadActivity(activityPage, activityPageSize)
+      .catch((error) => setNotice({ type: 'error', text: error.body?.message || error.message }));
+  }, [authUser?.id, page, activityPage, activityPageSize]);
 
   useEffect(() => {
     if (!notice) return undefined;
@@ -598,6 +628,32 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     }
   }
 
+  async function restoreLogEntry(item) {
+    const affected = item.affectedSessions || 1;
+    const confirmed = window.confirm(
+      `Restore ${affected} affected session${affected === 1 ? '' : 's'} to the state before this ${formatActionLabel(item.action).toLowerCase()} change?\n\n` +
+      'This creates a new restore log and does not erase any history.'
+    );
+    if (!confirmed) return;
+
+    setRestoringLogId(item.id);
+    setNotice(null);
+    try {
+      const result = await api.restoreActivity(item.id);
+      setActivityPage(1);
+      await Promise.all([loadMeta(), loadSessions(filters), loadActivity(1, activityPageSize)]);
+      setNotice({
+        type: 'success',
+        text: `${result.restoredSessionIds.length} session${result.restoredSessionIds.length === 1 ? '' : 's'} restored successfully.`
+      });
+    } catch (error) {
+      const details = error.body?.details?.conflicts?.map((conflict) => conflict.message).join(' ');
+      setNotice({ type: 'error', text: details || error.body?.message || error.message });
+    } finally {
+      setRestoringLogId(null);
+    }
+  }
+
   async function confirmBalancedSplit() {
     if (!splitWizard?.secondOccurrenceId || !splitWizard?.firstKeepSessionId) return;
     const current = splitWizard.options.current;
@@ -850,7 +906,20 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
         )}
 
         {page === 'logs' ? (
-          <LogsPage activity={activity} lastLoadedAt={lastLoadedAt} onRefresh={() => refreshAll(filters)} refreshing={refreshing} />
+          <LogsPage
+            activity={activity}
+            total={activityTotal}
+            stats={activityStats}
+            page={activityPage}
+            pageSize={activityPageSize}
+            lastLoadedAt={lastLoadedAt}
+            onPageChange={setActivityPage}
+            onPageSizeChange={setActivityPageSize}
+            onRestore={restoreLogEntry}
+            restoringLogId={restoringLogId}
+            onRefresh={refreshActivityLogs}
+            refreshing={refreshing}
+          />
         ) : (
           <>
             <section className="summary-stats">
@@ -1173,16 +1242,17 @@ function formatConflictType(type) {
   return 'Conflict';
 }
 
-function LogsPage({ activity, lastLoadedAt, onRefresh, refreshing }) {
-  const stats = getActivityStats(activity);
+function LogsPage({ activity, total, stats, page, pageSize, lastLoadedAt, onPageChange, onPageSizeChange, onRestore, restoringLogId, onRefresh, refreshing }) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   return (
     <>
       <section className="summary-stats">
-        <Metric label="Log Entries" value={activity.length} tone="primary" />
+        <Metric label="Log Entries" value={total} tone="primary" />
         <Metric label="Applied" value={stats.applied} tone="success" />
         <Metric label="Rejected" value={stats.rejected} tone="danger" />
         <Metric label="Pending" value={stats.pending} tone="warning" />
+        <Metric label="Failed" value={stats.failed} tone="secondary" />
       </section>
 
       <section className="logs-toolbar">
@@ -1195,12 +1265,25 @@ function LogsPage({ activity, lastLoadedAt, onRefresh, refreshing }) {
         </button>
       </section>
 
-      <ActivityPanel activity={activity} />
+      <ActivityPanel activity={activity} onRestore={onRestore} restoringLogId={restoringLogId} />
+      <nav className="logs-pagination" aria-label="Change log pages">
+        <span>Page {page} of {totalPages} · {total} entries</span>
+        <label>
+          Rows
+          <select value={pageSize} onChange={(event) => onPageSizeChange(Number(event.target.value))}>
+            <option value="20">20</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+        </label>
+        <button className="tiny-action" disabled={page <= 1} onClick={() => onPageChange(page - 1)}><ArrowLeft size={14} /> Previous</button>
+        <button className="tiny-action" disabled={page >= totalPages} onClick={() => onPageChange(page + 1)}>Next <ArrowLeft className="next-arrow" size={14} /></button>
+      </nav>
     </>
   );
 }
 
-function ActivityPanel({ activity }) {
+function ActivityPanel({ activity, onRestore, restoringLogId }) {
   if (!activity?.length) {
     return <div className="card empty-card">No log entries yet.</div>;
   }
@@ -1216,14 +1299,23 @@ function ActivityPanel({ activity }) {
           <article className="activity-item" key={item.id}>
             <span className={`status-badge ${item.status}`}>{item.status}</span>
             <div className="activity-main">
-              <strong>{titleCase(item.action)} {item.session?.courseCode || 'session'}</strong>
+              <strong>{formatActionLabel(item.action)} {item.session?.courseCode || 'session'}</strong>
               <span>
                 {formatActivitySession(item.session)}
                 {item.requestedBy ? ` by ${item.requestedBy}` : ''}
               </span>
               {item.message && <small>{item.message}{item.messageCount > 1 ? ` (+${item.messageCount - 1} more)` : ''}</small>}
+              {item.changes?.map((change) => <small className="activity-change" key={change}>{change}</small>)}
+              {item.affectedSessions > 1 && <small className="affected-count">Affected {item.affectedSessions} sessions</small>}
             </div>
-            <time>{formatRelativeTime(item.createdAt)}</time>
+            <div className="activity-actions">
+              <time title={new Date(item.createdAt).toLocaleString()}>{formatRelativeTime(item.createdAt)}</time>
+              {item.canRestore && (
+                <button className="restore-action" type="button" onClick={() => onRestore(item)} disabled={Boolean(restoringLogId)}>
+                  <Undo2 size={15} /> {restoringLogId === item.id ? 'Restoring' : 'Restore'}
+                </button>
+              )}
+            </div>
           </article>
         ))}
       </div>
@@ -2024,11 +2116,10 @@ function countByType(rows, type) {
   return rows.filter((session) => session.scheduleType === type).length;
 }
 
-function getActivityStats(activity) {
-  return activity.reduce((stats, item) => {
-    stats[item.status] = (stats[item.status] || 0) + 1;
-    return stats;
-  }, { applied: 0, rejected: 0, pending: 0 });
+function formatActionLabel(action) {
+  return String(action || 'update')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function getAllowedDays(meta, department) {
