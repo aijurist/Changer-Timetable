@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RESTORE_SESSION_SQL, restoreSessionParameters, sessionStateFromAuditSnapshot } from './restore.js';
+import { RESTORE_SESSION_SQL, restoreSessionParameters, sessionRestoreWouldChange, sessionStateFromAuditSnapshot } from './restore.js';
 
 const current = {
   id: 10,
@@ -17,6 +17,8 @@ const current = {
   allow_room_conflicts: false,
   room_conflict_override: false,
   allow_capacity_override: false,
+  is_batched: false,
+  is_co_scheduled: false,
   section_index: 8,
   partner_course_instance_key: null,
   partner_instance_id: null
@@ -70,4 +72,22 @@ test('keeps restore SQL placeholders aligned with its parameter list', () => {
   assert.match(RESTORE_SESSION_SQL, /updated_by = \$35/);
   assert.equal(parameters[0], current.id);
   assert.equal(parameters[34], 'admin@example.com');
+});
+
+test('detects a duplicate restore that would not change timetable state', () => {
+  const unchanged = sessionStateFromAuditSnapshot(current, {
+    status: 'active',
+    day: 'tuesday',
+    slotKey: 'T2',
+    slotIndex: 1,
+    timeLabel: '8:50 - 9:40',
+    startMinute: 530,
+    endMinute: 580,
+    teacherId: 20,
+    roomId: 30
+  });
+  const changed = sessionStateFromAuditSnapshot(current, { status: 'archived' });
+
+  assert.equal(sessionRestoreWouldChange(current, unchanged), false);
+  assert.equal(sessionRestoreWouldChange(current, changed), true);
 });

@@ -1165,6 +1165,20 @@ input:focus,
   font-weight: 750;
 }
 
+.restored-label {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid #a7d8c1;
+  border-radius: 5px;
+  color: #17633f;
+  background: #edf8f2;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
 .restore-action:hover:not(:disabled) {
   border-color: #5590b8;
   background: #eef7fc;

@@ -27,7 +27,7 @@ import {
 } from './section.js';
 import { normalizeDay } from './time.js';
 import { createAuthRouter, requireAuth } from './auth.js';
-import { RESTORE_SESSION_SQL, restoreSessionParameters, sessionStateFromAuditSnapshot } from './restore.js';
+import { RESTORE_SESSION_SQL, restoreSessionParameters, sessionRestoreWouldChange, sessionStateFromAuditSnapshot } from './restore.js';
 import { resolveSwapSessions } from './roomSwap.js';
 import { createLiveUpdateHub } from './liveUpdates.js';
 import {
@@ -686,7 +686,14 @@ app.get('/api/activity', adminOnly, async (req, res, next) => {
          audit.before_payload AS audit_before_payload,
          audit.after_payload AS audit_after_payload,
          audit.audit_count,
-         audit.departments AS audit_departments
+         audit.departments AS audit_departments,
+         EXISTS (
+           SELECT 1
+           FROM edit_requests restoration
+           WHERE restoration.status = 'applied'
+             AND restoration.payload->>'action' = 'restore'
+             AND restoration.payload->>'sourceEditRequestId' = er.id::text
+         ) AS has_applied_restore
        FROM edit_requests er
        LEFT JOIN sessions s ON s.id = er.session_id
        LEFT JOIN teachers t ON t.id = s.teacher_id
@@ -805,10 +812,25 @@ app.post('/api/activity/:id/restore', adminOnly, async (req, res, next) => {
     const updatedBy = req.auth.user.email;
 
     const result = await withTransaction(async (client) => {
-      const sourceRequest = await client.query('SELECT * FROM edit_requests WHERE id = $1', [sourceRequestId]);
+      const sourceRequest = await client.query('SELECT * FROM edit_requests WHERE id = $1 FOR UPDATE', [sourceRequestId]);
       if (!sourceRequest.rowCount) throw new HttpError(404, 'Log entry not found.');
       if (sourceRequest.rows[0].status !== 'applied') {
         throw new HttpError(409, 'Only successfully applied changes can be restored.');
+      }
+      if (sourceRequest.rows[0].payload?.action === 'restore') {
+        throw new HttpError(409, 'Restore history cannot be restored again. Choose the original change instead.');
+      }
+      const existingRestore = await client.query(
+        `SELECT id
+         FROM edit_requests
+         WHERE status = 'applied'
+           AND payload->>'action' = 'restore'
+           AND payload->>'sourceEditRequestId' = $1::text
+         LIMIT 1`,
+        [sourceRequestId]
+      );
+      if (existingRestore.rowCount) {
+        throw new HttpError(409, 'This change has already been restored.');
       }
 
       const audits = await client.query(
@@ -847,6 +869,9 @@ app.post('/api/activity/:id/restore', adminOnly, async (req, res, next) => {
           target: sessionStateFromAuditSnapshot(current, audit.before_payload, roomById.get(roomId))
         };
       });
+      if (!targets.some(({ current, target }) => sessionRestoreWouldChange(current, target))) {
+        throw new HttpError(409, 'This session already matches the version you selected. Nothing was changed.');
+      }
 
       const resourceKeys = targets.flatMap(({ current, target }) => buildResourceKeys(current, target));
       await lockResources(client, [...new Set(resourceKeys)].sort());
@@ -2234,6 +2259,8 @@ function mapActivityRow(row) {
     ...(result.conflicts || []).map((item) => item.message || item.type).filter(Boolean),
     ...(result.warnings || []).map((item) => item.message || item.type).filter(Boolean)
   ].filter(Boolean);
+  const isRestoreHistory = action === 'restore' || action === 'temporary_overlap_auto_revert';
+  const alreadyRestored = Boolean(row.has_applied_restore);
 
   return {
     id: row.id,
@@ -2247,7 +2274,8 @@ function mapActivityRow(row) {
     messageCount: messages.length,
     changes: describeAuditChanges(row.audit_before_payload, row.audit_after_payload),
     affectedSessions: Number(row.audit_count || 0),
-    canRestore: row.status === 'applied' && Number(row.audit_count || 0) > 0,
+    canRestore: row.status === 'applied' && Number(row.audit_count || 0) > 0 && !isRestoreHistory && !alreadyRestored,
+    restoreState: isRestoreHistory ? 'history' : alreadyRestored ? 'restored' : 'available',
     departments: row.audit_departments?.length
       ? row.audit_departments
       : [snapshot.department || row.department || payload.department].filter(Boolean),

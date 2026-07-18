@@ -30,6 +30,12 @@ export function restoreSessionParameters(target, updatedBy) {
   ];
 }
 
+export function sessionRestoreWouldChange(current, target) {
+  const currentValues = restoreSessionParameters(current, null).slice(1, -1);
+  const targetValues = restoreSessionParameters(target, null).slice(1, -1);
+  return currentValues.some((value, index) => !sameDatabaseValue(value, targetValues[index]));
+}
+
 export function sessionStateFromAuditSnapshot(current, snapshot, room = {}) {
   const isCreatedSession = !snapshot || Object.keys(snapshot).length === 0;
   if (isCreatedSession) {
@@ -84,6 +90,15 @@ export function sessionStateFromAuditSnapshot(current, snapshot, room = {}) {
 
 function valueOr(snapshot, key, fallback) {
   return Object.prototype.hasOwnProperty.call(snapshot, key) ? snapshot[key] : fallback;
+}
+
+function sameDatabaseValue(left, right) {
+  if (left === null || left === undefined) return right === null || right === undefined;
+  if (right === null || right === undefined) return false;
+  if (typeof left === 'object' || typeof right === 'object') {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+  return String(left) === String(right);
 }
 
 function alignSectionSuffix(value, sectionIndex) {

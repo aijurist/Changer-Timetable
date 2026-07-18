@@ -278,6 +278,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     if (selected) {
       const refreshed = result.rows.find((row) => row.id === selected.id);
       if (!refreshed) closeEditor();
+      else setSelected(refreshed);
     }
   }
 
@@ -1627,6 +1628,9 @@ function ActivityPanel({ activity, onRestore, restoringLogId }) {
                 <button className="restore-action" type="button" onClick={() => onRestore(item)} disabled={Boolean(restoringLogId)}>
                   <Undo2 size={15} /> {restoringLogId === item.id ? 'Restoring' : 'Restore'}
                 </button>
+              )}
+              {item.restoreState === 'restored' && (
+                <span className="restored-label"><Check size={14} /> Restored</span>
               )}
             </div>
           </article>
