@@ -14,7 +14,7 @@ import {
   validateDepartmentDay
 } from './validation.js';
 import { getRoomCapacity, isPreferredLabRoom } from './roomRules.js';
-import { labCsvHeaders, theoryCsvHeaders, toCsv, toLegacySession } from './legacyExport.js';
+import { csvHeadersFor, toCsv, toLegacySession } from './legacyExport.js';
 import {
   getPartnerCourseInstanceKey,
   hasSamePairedCourseSet,
@@ -923,26 +923,63 @@ app.get('/api/export/:type.:format', async (req, res, next) => {
       throw new HttpError(404, 'Export not found');
     }
 
+    const departments = parseExportDepartments(req.query.department);
+    const semester = parseExportSemester(req.query.semester);
+    const parameters = [type];
+    const conditions = ["s.status = 'active'", 's.schedule_type = $1'];
+    if (departments.length) {
+      parameters.push(departments);
+      conditions.push(`s.department = ANY($${parameters.length}::text[])`);
+    }
+    if (semester !== null) {
+      parameters.push(semester);
+      conditions.push(`s.semester = $${parameters.length}`);
+    }
+
     const result = await pool.query(
       `${sessionSelectSql()}
-       WHERE s.status = 'active' AND s.schedule_type = $1
+       WHERE ${conditions.join(' AND ')}
        ORDER BY s.source_index, s.id`,
-      [type]
+      parameters
     );
     const rows = result.rows.map(toLegacySession);
+    const filename = exportFilename(type, format, semester);
 
     if (format === 'json') {
-      res.header('Content-Disposition', `attachment; filename="${type}_schedule.json"`);
+      res.header('Content-Disposition', `attachment; filename="${filename}"`);
       return res.json(rows);
     }
 
     res.header('Content-Type', 'text/csv; charset=utf-8');
-    res.header('Content-Disposition', `attachment; filename="${type}_schedule.csv"`);
-    return res.send(toCsv(rows, type === 'lab' ? labCsvHeaders : theoryCsvHeaders));
+    res.header('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.send(toCsv(rows, csvHeadersFor(type, semester)));
   } catch (error) {
     next(error);
   }
 });
+
+function parseExportDepartments(value) {
+  const values = Array.isArray(value) ? value : value == null ? [] : [value];
+  const departments = [...new Set(values.map((item) => String(item).trim()).filter(Boolean))];
+  if (departments.length > 50 || departments.some((department) => department.length > 160)) {
+    throw new HttpError(400, 'Invalid department selection');
+  }
+  return departments;
+}
+
+function parseExportSemester(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const semester = Number(value);
+  if (!Number.isInteger(semester) || semester < 1 || semester > 12) {
+    throw new HttpError(400, 'Invalid semester selection');
+  }
+  return semester;
+}
+
+function exportFilename(type, format, semester) {
+  const suffix = Number(semester) === 3 ? '_second_year' : semester ? `_semester_${semester}` : '';
+  return `${type}_schedule${suffix}.${format}`;
+}
 
 app.post('/api/sessions', adminOnly, async (req, res, next) => {
   try {

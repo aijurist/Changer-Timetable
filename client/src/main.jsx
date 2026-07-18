@@ -12,6 +12,8 @@ import {
   Download,
   Eye,
   EyeOff,
+  FileJson,
+  FileSpreadsheet,
   History,
   LockKeyhole,
   LogOut,
@@ -189,6 +191,7 @@ function LoginPage({ onAuthenticated, onCancel }) {
 }
 
 function ChangerApp({ authUser, onLogin, onLogout }) {
+  const [exportDialog, setExportDialog] = useState(null);
   const [showConflicts, setShowConflicts] = useState(false);
   const {
     page,
@@ -928,6 +931,41 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     }
   }
 
+  function openExportDialog() {
+    setExportDialog({
+      format: 'csv',
+      semester: filters.semester || '',
+      types: ['theory', 'lab'],
+      departments: filters.department ? [filters.department] : filterValues.departments,
+      search: ''
+    });
+  }
+
+  async function downloadSelectedExports() {
+    if (!exportDialog?.types.length || !exportDialog.departments.length) return;
+    setSaving(true);
+    try {
+      for (const type of exportDialog.types) {
+        const file = await api.exportFile({
+          type,
+          format: exportDialog.format,
+          departments: exportDialog.departments,
+          semester: exportDialog.semester
+        });
+        triggerFileDownload(file);
+      }
+      setNotice({
+        type: 'success',
+        text: `${exportDialog.types.length} ${exportDialog.format.toUpperCase()} export${exportDialog.types.length === 1 ? '' : 's'} downloaded successfully.`
+      });
+      setExportDialog(null);
+    } catch (error) {
+      setNotice({ type: 'error', text: error.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
   if (loading) {
     return (
       <main className="loading-shell">
@@ -948,10 +986,9 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
         </div>
         <div className="navbar-title">{page === 'logs' ? 'Change Logs' : 'Combined Schedule View'}</div>
         <div className="navbar-actions">
-          <a className="nav-button" href="/api/export/theory.csv" title="Export theory CSV"><Download size={17} /> Theory CSV</a>
-          <a className="nav-button" href="/api/export/lab.csv" title="Export lab CSV"><Download size={17} /> Lab CSV</a>
-          <a className="nav-button nav-button-compact" href="/api/export/theory.json" title="Export theory JSON">Theory JSON</a>
-          <a className="nav-button nav-button-compact" href="/api/export/lab.json" title="Export lab JSON">Lab JSON</a>
+          <button className="nav-button" type="button" onClick={openExportDialog} title="Choose timetable data to export">
+            <Download size={17} /> Export
+          </button>
           <button className="nav-button" onClick={() => refreshAll(filters)} disabled={refreshing}>
             <RefreshCw size={17} className={refreshing ? 'spin-slow' : ''} /> Refresh
           </button>
@@ -1159,7 +1196,126 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
           onSave={createSession}
         />
       )}
+
+      {exportDialog && (
+        <ExportModal
+          value={exportDialog}
+          departments={filterValues.departments}
+          semesters={filterValues.semesters}
+          downloading={saving}
+          onChange={(patch) => setExportDialog((current) => ({ ...current, ...patch }))}
+          onClose={() => setExportDialog(null)}
+          onDownload={downloadSelectedExports}
+        />
+      )}
     </>
+  );
+}
+
+function ExportModal({ value, departments, semesters, downloading, onChange, onClose, onDownload }) {
+  const needle = value.search.trim().toLowerCase();
+  const visibleDepartments = departments.filter((department) => department.toLowerCase().includes(needle));
+  const allSelected = departments.length > 0 && departments.every((department) => value.departments.includes(department));
+  const canDownload = value.departments.length > 0 && value.types.length > 0 && !downloading;
+
+  function toggleDepartment(department) {
+    const selected = value.departments.includes(department)
+      ? value.departments.filter((item) => item !== department)
+      : [...value.departments, department];
+    onChange({ departments: selected });
+  }
+
+  function toggleType(type) {
+    const selected = value.types.includes(type)
+      ? value.types.filter((item) => item !== type)
+      : [...value.types, type];
+    onChange({ types: selected });
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <section className="edit-modal export-modal" aria-labelledby="export-title">
+        <header className="modal-header">
+          <div>
+            <h2 id="export-title">Export timetable</h2>
+            <p>Choose exactly which departments and sessions to download.</p>
+          </div>
+          <button className="close-button" type="button" onClick={onClose} aria-label="Close export dialog"><X size={18} /></button>
+        </header>
+
+        <div className="modal-body export-modal-body">
+          <div className="export-settings">
+            <fieldset>
+              <legend>File format</legend>
+              <div className="export-segmented">
+                <button type="button" className={value.format === 'csv' ? 'active' : ''} onClick={() => onChange({ format: 'csv' })}>
+                  <FileSpreadsheet size={17} /> CSV
+                </button>
+                <button type="button" className={value.format === 'json' ? 'active' : ''} onClick={() => onChange({ format: 'json' })}>
+                  <FileJson size={17} /> JSON
+                </button>
+              </div>
+            </fieldset>
+
+            <label>Semester
+              <select value={value.semester} onChange={(event) => onChange({ semester: event.target.value })}>
+                <option value="">All semesters</option>
+                {semesters.map((semester) => <option key={semester} value={semester}>Semester {semester}</option>)}
+              </select>
+            </label>
+          </div>
+
+          {String(value.semester) === '3' && (
+            <div className="export-format-note">
+              Semester 3 uses the second-year CSV schema, including section, bundle, and lab batch fields.
+            </div>
+          )}
+
+          <fieldset className="export-types">
+            <legend>Session files</legend>
+            <label><input type="checkbox" checked={value.types.includes('theory')} onChange={() => toggleType('theory')} /> Theory</label>
+            <label><input type="checkbox" checked={value.types.includes('lab')} onChange={() => toggleType('lab')} /> Lab</label>
+          </fieldset>
+
+          <section className="export-departments">
+            <header>
+              <div>
+                <strong>Departments</strong>
+                <span>{value.departments.length} of {departments.length} selected</span>
+              </div>
+              <button type="button" onClick={() => onChange({ departments: allSelected ? [] : [...departments] })}>
+                {allSelected ? 'Clear all' : 'Select all'}
+              </button>
+            </header>
+            <label className="export-search">
+              <Search size={16} />
+              <input value={value.search} onChange={(event) => onChange({ search: event.target.value })} placeholder="Search departments" />
+            </label>
+            <div className="export-department-list">
+              {visibleDepartments.map((department) => (
+                <label key={department}>
+                  <input type="checkbox" checked={value.departments.includes(department)} onChange={() => toggleDepartment(department)} />
+                  <span>{department}</span>
+                </label>
+              ))}
+              {!visibleDepartments.length && <div className="export-empty">No departments match this search.</div>}
+            </div>
+          </section>
+        </div>
+
+        <footer className="modal-actions">
+          <span className="export-selection-summary">
+            {value.departments.length} department{value.departments.length === 1 ? '' : 's'} / {value.types.length} file{value.types.length === 1 ? '' : 's'}
+          </span>
+          <span className="modal-spacer" />
+          <button className="secondary-action" type="button" onClick={onClose} disabled={downloading}>Cancel</button>
+          <button className="primary-action" type="button" onClick={onDownload} disabled={!canDownload}>
+            {downloading ? <Clock size={17} /> : <Download size={17} />}
+            {downloading ? 'Preparing' : 'Download'}
+          </button>
+        </footer>
+      </section>
+    </div>
   );
 }
 
@@ -1998,6 +2154,17 @@ function formatOverlapCountdown(expiresAt, now) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function triggerFileDownload({ blob, filename }) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function Detail({ label, value }) {

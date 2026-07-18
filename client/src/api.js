@@ -42,6 +42,7 @@ export const api = {
   conflicts: () => request('/api/conflicts?limit=100'),
   activity: (params = {}) => request(`/api/activity?${new URLSearchParams(cleanParams(params))}`),
   temporaryOverlaps: () => request('/api/temporary-overlaps'),
+  exportFile: ({ type, format, departments = [], semester = '' }) => downloadExport({ type, format, departments, semester }),
   restoreActivity: (id) => request(`/api/activity/${id}/restore`, { method: 'POST' }),
   createSession: (payload) => request('/api/sessions', {
     method: 'POST',
@@ -60,6 +61,21 @@ export const api = {
     body: JSON.stringify(payload)
   })
 };
+
+async function downloadExport({ type, format, departments, semester }) {
+  const params = new URLSearchParams();
+  for (const department of departments) params.append('department', department);
+  if (semester) params.set('semester', semester);
+  const response = await fetch(`${API_BASE}/api/export/${type}.${format}?${params}`, { credentials: 'include' });
+  if (!response.ok) {
+    const contentType = response.headers.get('content-type') || '';
+    const body = contentType.includes('application/json') ? await response.json() : await response.text();
+    throw new Error(body?.message || response.statusText);
+  }
+  const disposition = response.headers.get('content-disposition') || '';
+  const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || `${type}_schedule.${format}`;
+  return { blob: await response.blob(), filename };
+}
 
 function cleanParams(params = {}) {
   return Object.fromEntries(
