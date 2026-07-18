@@ -28,6 +28,7 @@ import {
 import { normalizeDay } from './time.js';
 import { createAuthRouter, requireAuth } from './auth.js';
 import { RESTORE_SESSION_SQL, restoreSessionParameters, sessionStateFromAuditSnapshot } from './restore.js';
+import { resolveSwapSessions } from './roomSwap.js';
 
 const app = express();
 if (config.nodeEnv === 'production') app.set('trust proxy', 1);
@@ -1513,15 +1514,15 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
       const locked = await client.query(
         `SELECT *
          FROM sessions
-         WHERE id = ANY($1::int[])
+         WHERE id = ANY($1::bigint[])
          ORDER BY id
          FOR UPDATE`,
         [ids]
       );
       if (locked.rowCount !== 2) throw new HttpError(404, 'One of the sessions was not found.');
 
-      const current = locked.rows.find((row) => row.id === sessionId);
-      const other = locked.rows.find((row) => row.id === payload.otherSessionId);
+      const { current, other } = resolveSwapSessions(locked.rows, sessionId, payload.otherSessionId);
+      if (!current || !other) throw new HttpError(404, 'One of the sessions was not found.');
       if (current.status !== 'active' || other.status !== 'active') {
         await rejectEdit(client, requestId, 'inactive_session', { sessionId, otherSessionId: payload.otherSessionId });
         return { status: 409, body: { success: false, message: 'Both sessions must be active before rooms can be swapped.' } };
@@ -1574,7 +1575,7 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
          FROM sessions s
          JOIN rooms r ON r.id = s.room_id
          WHERE s.status = 'active'
-           AND s.id <> ALL($1::int[])
+           AND s.id <> ALL($1::bigint[])
            AND s.allow_room_conflicts = false
            AND (
              (
@@ -1620,6 +1621,7 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
              capacity = $3,
              allow_room_conflicts = $4,
              row_version = row_version + 1,
+             updated_at = now(),
              updated_by = $5
          WHERE id = $1`,
         [
@@ -1636,6 +1638,7 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
              capacity = $3,
              allow_room_conflicts = $4,
              row_version = row_version + 1,
+             updated_at = now(),
              updated_by = $5
          WHERE id = $1`,
         [
