@@ -28,7 +28,7 @@ export function compareLabBatches(left, right) {
   return leftBatch === rightBatch ? 'same' : 'different';
 }
 
-export async function findSessionConflicts(client, nextSession, excludeSessionId) {
+export async function findSessionConflicts(client, nextSession, excludeSessionId, options = {}) {
   const conflicts = [];
   const warnings = [];
   const excludedIds = normalizeExcludedIds(excludeSessionId);
@@ -122,11 +122,20 @@ export async function findSessionConflicts(client, nextSession, excludeSessionId
         });
         continue;
       }
-      conflicts.push({
+      const sectionConflict = {
         type: 'section_conflict',
         message: `Section ${getSectionLabelFromIndex(sectionIndex)} also has ${row.course_code} at ${row.time_label}.`,
         session: row
-      });
+      };
+      if (options.allowSectionOverlap) {
+        warnings.push({
+          ...sectionConflict,
+          type: 'section_overlap_override',
+          message: `Temporary overlap allowed: ${sectionConflict.message}`
+        });
+      } else {
+        conflicts.push(sectionConflict);
+      }
     }
   } else if (nextSession.group_name) {
     const groupRows = await client.query(

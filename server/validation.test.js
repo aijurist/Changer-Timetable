@@ -150,6 +150,39 @@ test('reports a specific conflict when the same lab batch already occupies the s
   assert.match(result.conflicts[0].message, /already has Batch 1/);
 });
 
+test('can downgrade a Semester 3 section clash to an explicit temporary-overlap warning', async () => {
+  const client = fakeClient({
+    section: [{ id: 50, course_code: 'CS23002', time_label: '8:00 - 8:50' }]
+  });
+
+  const result = await findSessionConflicts(client, sectionSession(), 1, { allowSectionOverlap: true });
+
+  assert.equal(result.conflicts.length, 0);
+  assert.equal(result.warnings.length, 1);
+  assert.equal(result.warnings[0].type, 'section_overlap_override');
+  assert.match(result.warnings[0].message, /Temporary overlap allowed/);
+});
+
+test('temporary section overlap never bypasses a same-batch lab conflict', async () => {
+  const client = fakeClient({
+    section: [{
+      id: 50,
+      course_code: 'CS23332',
+      time_label: '8:00 - 9:40',
+      schedule_type: 'lab',
+      is_batched: true,
+      batch_number: 1
+    }]
+  });
+  const session = sectionSession({ schedule_type: 'lab', is_batched: true, batch_number: 1 });
+
+  const result = await findSessionConflicts(client, session, 1, { allowSectionOverlap: true });
+
+  assert.equal(result.conflicts.length, 1);
+  assert.equal(result.conflicts[0].type, 'batch_conflict');
+  assert.equal(result.warnings.length, 0);
+});
+
 test('normalizes batch numbers from structured fields and labels', () => {
   assert.equal(getLabBatchNumber({ scheduleType: 'lab', isBatched: true, batchNumber: 2 }), 2);
   assert.equal(getLabBatchNumber({ schedule_type: 'lab', is_batched: true, batch_info: 'Batch 1' }), 1);

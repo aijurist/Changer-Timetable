@@ -69,6 +69,7 @@ const sessionPatchSchema = z.object({
   coScheduleInfo: z.union([z.string().trim().max(300), z.null()]).optional(),
   courseCodeDisplay: z.union([z.string().trim().max(120), z.null()]).optional(),
   allowCapacityOverride: z.boolean().optional(),
+  allowSectionOverlap: z.boolean().optional(),
   batchConflictSessionId: z.coerce.number().int().positive().optional(),
   batchConflictRowVersion: z.coerce.number().int().positive().optional(),
   rowVersion: z.coerce.number().int().positive().optional(),
@@ -1095,9 +1096,12 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
 
       const policy = await findDepartmentPolicy(client, nextSession.department);
       const dayError = validateDepartmentDay(policy, nextSession.day);
-      const validation = await findSessionConflicts(client, nextSession, movingIds);
+      const validationOptions = {
+        allowSectionOverlap: Boolean(payload.allowSectionOverlap) && getSectionIndex(nextSession) !== null
+      };
+      const validation = await findSessionConflicts(client, nextSession, movingIds, validationOptions);
       if (movesPair) {
-        const pairedValidation = await findSessionConflicts(client, pairedNextSession, movingIds);
+        const pairedValidation = await findSessionConflicts(client, pairedNextSession, movingIds, validationOptions);
         validation.conflicts.push(...pairedValidation.conflicts);
         validation.warnings.push(...pairedValidation.warnings);
       }

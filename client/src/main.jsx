@@ -418,6 +418,10 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     () => findBatchConflictSession(sessions, selected, draft, slots),
     [sessions, selected, draft, slots]
   );
+  const sectionConflicts = useMemo(
+    () => findSectionConflictSessions(sessions, selected, draft, slots),
+    [sessions, selected, draft, slots]
+  );
   const createCourses = useMemo(
     () => createDraft ? getCoursesForSelection(sessions, createDraft) : [],
     [sessions, createDraft?.department, createDraft?.semester, createDraft?.scheduleType]
@@ -514,6 +518,17 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
       );
       if (!confirmed) return;
     }
+    if (sectionConflicts.length && draft.allowSectionOverlap) {
+      const occupants = sectionConflicts
+        .map((session) => `${session.courseCode} - ${session.teacherName || 'Staff TBA'} (${session.roomNumber || 'Room TBA'})`)
+        .join('\n');
+      const confirmed = window.confirm(
+        `This creates a temporary overlap for Section ${selected.sectionLabel}.\n\n` +
+        `Sessions already in this timeslot:\n${occupants}\n\n` +
+        'Teacher, room, capacity, and lab-batch clashes will still be rejected. Continue?'
+      );
+      if (!confirmed) return;
+    }
     setSaving(true);
     setNotice(null);
     try {
@@ -525,6 +540,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
         studentCount: draft.studentCount,
         totalStudents: draft.totalStudents,
         allowCapacityOverride: draft.allowCapacityOverride,
+        allowSectionOverlap: draft.allowSectionOverlap,
         isBatched: draft.isBatched,
         batchInfo: draft.batchInfo,
         numBatches: draft.numBatches,
@@ -953,6 +969,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
           onSave={saveDraft}
           onSwapRoom={swapSelectedRoom}
           batchConflict={batchConflict}
+          sectionConflicts={sectionConflicts}
           onSplit={openBalancedSplit}
           onDelete={deleteSelectedSession}
           days={meta?.days || []}
@@ -1214,7 +1231,7 @@ function ActivityPanel({ activity }) {
   );
 }
 
-function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onBatchChange, onClose, onSave, onSwapRoom, batchConflict, onSplit, onDelete, days }) {
+function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onBatchChange, onClose, onSave, onSwapRoom, batchConflict, sectionConflicts, onSplit, onDelete, days }) {
   const selectedRoom = rooms.find((room) => String(room.id) === String(draft.roomId));
   const pairedSession = draft.pairedSession;
   const movesPair = Boolean(pairedSession) && (
@@ -1335,6 +1352,31 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
             <span>Bypass effective student count capacity check</span>
           </label>
 
+          {Number(selected.semester) === 3 && (
+            <div className={`section-overlap-control${sectionConflicts.length ? ' has-conflict' : ''}`}>
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.allowSectionOverlap)}
+                  onChange={(event) => onChange('allowSectionOverlap', event.target.checked)}
+                />
+                <span>Allow a temporary overlap in Section {selected.sectionLabel}</span>
+              </label>
+              <small>Only the section clash is bypassed. Staff, room, capacity, and batch checks remain active.</small>
+              {sectionConflicts.length > 0 && (
+                <div className="section-overlap-list" role="status">
+                  <AlertTriangle size={17} />
+                  <div>
+                    <strong>{sectionConflicts.length} session{sectionConflicts.length === 1 ? '' : 's'} already use this section and time</strong>
+                    {sectionConflicts.map((session) => (
+                      <span key={session.id}>{session.courseCode} · {session.teacherName || 'Staff TBA'} · {session.roomNumber || 'Room TBA'}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {draft.scheduleType === 'lab' ? (
             <>
               <LabBatchPicker draft={draft} onChange={onBatchChange} />
@@ -1374,7 +1416,7 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
           <button className="danger-action" onClick={onDelete} disabled={saving}><Trash2 size={17} /> Delete</button>
           <span className="modal-spacer" />
           <button className="secondary-action" onClick={onClose}>Cancel</button>
-          <button className="primary-action" onClick={onSave} disabled={saving}>{saving ? <Clock size={17} /> : batchConflict ? <ArrowLeftRight size={17} /> : <Save size={17} />} {saving ? 'Saving' : batchConflict ? 'Save & Swap Batches' : movesPair ? 'Move Paired Session' : 'Save Changes'}</button>
+          <button className="primary-action" onClick={onSave} disabled={saving}>{saving ? <Clock size={17} /> : batchConflict ? <ArrowLeftRight size={17} /> : sectionConflicts.length && draft.allowSectionOverlap ? <AlertTriangle size={17} /> : <Save size={17} />} {saving ? 'Saving' : batchConflict ? 'Save & Swap Batches' : sectionConflicts.length && draft.allowSectionOverlap ? 'Save with Overlap' : movesPair ? 'Move Paired Session' : 'Save Changes'}</button>
         </footer>
       </section>
     </div>
@@ -2191,6 +2233,25 @@ function findBatchConflictSession(sessions, selected, draft, slots) {
   }) || null;
 }
 
+function findSectionConflictSessions(sessions, selected, draft, slots) {
+  if (!selected || !draft || Number(selected.semester) !== 3 || selected.sectionIndex === null || selected.sectionIndex === undefined) return [];
+  const slot = slots.find((entry) => entry.slot_key === draft.slotKey);
+  if (!slot) return [];
+  const excludedIds = new Set([draft.id, draft.pairedSessionId].filter(Boolean).map(Number));
+  const draftBatch = getBatchNumber(draft);
+
+  return sessions.filter((candidate) => {
+    if (excludedIds.has(Number(candidate.id))) return false;
+    if (candidate.department !== selected.department || Number(candidate.semester) !== 3) return false;
+    if (candidate.sectionIndex === null || candidate.sectionIndex === undefined) return false;
+    if (Number(candidate.sectionIndex) !== Number(selected.sectionIndex) || candidate.day !== draft.day) return false;
+    if (!rangesOverlap(candidate.startMinute, candidate.endMinute, slot.start_minute, slot.end_minute)) return false;
+
+    const candidateBatch = getBatchNumber(candidate);
+    return !(draft.scheduleType === 'lab' && candidate.scheduleType === 'lab' && draftBatch && candidateBatch);
+  });
+}
+
 function rangesOverlap(leftStart, leftEnd, rightStart, rightEnd) {
   return Number(leftStart) < Number(rightEnd) && Number(rightStart) < Number(leftEnd);
 }
@@ -2270,6 +2331,7 @@ function toDraft(session) {
     studentCount: session.studentCount,
     totalStudents: session.totalStudents,
     allowCapacityOverride: session.allowCapacityOverride,
+    allowSectionOverlap: false,
     isBatched: session.isBatched,
     batchInfo: session.batchInfo,
     numBatches: session.numBatches,

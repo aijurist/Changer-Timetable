@@ -6,6 +6,7 @@ import { pool, closePool } from '../db.js';
 import { normalizeDay, parseTimeRange } from '../time.js';
 import { canonicalRoomNumber, isSharedCollisionRoom } from '../roomRules.js';
 import { normalizeStaffCode, sameTeacherIdentity } from '../teacherIdentity.js';
+import { normalizeSecondYearDepartment, normalizeSecondYearRow } from '../secondYearSections.js';
 
 const options = parseArgs(process.argv.slice(2));
 
@@ -22,12 +23,15 @@ async function main() {
   const allRows = [
     ...theoryRows.map((row, sourceIndex) => ({ row, sourceIndex, scheduleType: 'theory' })),
     ...labRows.map((row, sourceIndex) => ({ row, sourceIndex, scheduleType: 'lab' }))
-  ].filter(({ row }) => Number(row.semester) === 3);
+  ]
+    .filter(({ row }) => Number(row.semester) === 3)
+    .map((item) => ({ ...item, row: normalizeSecondYearRow(item.row) }));
+  const requestedDepartment = normalizeSecondYearDepartment(options.department);
   const selectedRows = options.allDepartments
     ? allRows
-    : allRows.filter(({ row }) => row.department === options.department);
+    : allRows.filter(({ row }) => row.department === requestedDepartment);
 
-  if (!selectedRows.length) throw new Error(`No Semester 3 rows found for ${options.department || 'the supplied files'}.`);
+  if (!selectedRows.length) throw new Error(`No Semester 3 rows found for ${requestedDepartment || 'the supplied files'}.`);
   const departments = [...new Set(selectedRows.map(({ row }) => row.department))].sort();
   const sectionsByDepartment = Object.fromEntries(departments.map((department) => [
     department,
@@ -54,7 +58,7 @@ async function main() {
          ${options.allDepartments ? '' : 'AND department = $1'}
          AND source_file LIKE 'second_year_csv:%'
          AND status = 'active'`,
-      options.allDepartments ? [] : [options.department]
+      options.allDepartments ? [] : [requestedDepartment]
     );
 
     const importedIds = [];
@@ -79,7 +83,7 @@ async function main() {
 
     const summary = {
       scope: options.allDepartments ? 'all_departments' : 'department',
-      department: options.department || null,
+      department: requestedDepartment || null,
       departments,
       departmentCount: departments.length,
       sectionsByDepartment,
@@ -98,7 +102,7 @@ async function main() {
     };
 
     if (!options.allDepartments) {
-      const sections = sectionsByDepartment[options.department];
+      const sections = sectionsByDepartment[requestedDepartment];
       summary.sections = sections;
       summary.sectionLabels = sections.map(sectionLabel);
     } else {
@@ -109,7 +113,7 @@ async function main() {
       `INSERT INTO app_settings (key, value)
        VALUES ($1, $2)
        ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now()`,
-      [`second_year_import:${options.department || 'all'}`, {
+      [`second_year_import:${requestedDepartment || 'all'}`, {
         ...summary,
         theoryFile: path.basename(options.theory),
         labFile: path.basename(options.lab),

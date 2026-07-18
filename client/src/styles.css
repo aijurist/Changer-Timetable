@@ -1720,6 +1720,58 @@ input:focus,
   padding: 0;
 }
 
+.section-overlap-control {
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid #d5e0e8;
+  border-radius: 7px;
+  background: #f8fbfd;
+}
+
+.section-overlap-control.has-conflict {
+  border-color: #edbb69;
+  background: #fffaf0;
+}
+
+.section-overlap-control .check-row {
+  margin: 0;
+  color: #243746;
+  font-weight: 700;
+}
+
+.section-overlap-control > small {
+  display: block;
+  margin: 6px 0 0 24px;
+  color: #65717d;
+  line-height: 1.4;
+}
+
+.section-overlap-list {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #f0cf96;
+  color: #7a4a08;
+}
+
+.section-overlap-list > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.section-overlap-list > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.section-overlap-list span {
+  color: #8a5b1a;
+  font-size: 0.8rem;
+}
+
 .lab-batch-control {
   display: flex;
   align-items: center;

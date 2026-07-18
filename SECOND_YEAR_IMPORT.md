@@ -12,6 +12,8 @@ Migration `004_second_year_sections.sql` adds these indexed session fields:
 
 The original CSV row remains in `raw_payload`. Existing numeric `course_instance_id` foreign keys retain the base ID (`622`), so the current course table stays compatible.
 
+`Computer Science & Engineering A` and `Computer Science & Engineering B` are normalized into one `Computer Science & Engineering` department. CSE-A keeps Sections A-G; CSE-B's source Sections A-F continue as Sections H-M.
+
 ## Supabase import method
 
 Use the Supabase shared pooler URL through `DATABASE_URL`; never add the password or URL to Git.
