@@ -11,6 +11,7 @@
     "dev:api": "node --watch server/index.js",
     "dev:web": "vite --config client/vite.config.js --host 0.0.0.0",
     "start": "node server/index.js",
+    "test": "node --test server/*.test.js",
     "build": "vite build --config client/vite.config.js",
     "preview": "vite preview --config client/vite.config.js --host 0.0.0.0",
     "db:migrate": "node server/scripts/migrate.js",

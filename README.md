@@ -83,6 +83,12 @@ Recommended free setup:
 
 `npm run deploy:init` runs migrations, `db:seed:if-empty`, and the single-admin seed check. The timetable seed runs only when `sessions` is empty. An existing admin password is preserved when `AUTH_ADMIN_PASSWORD` is absent.
 
+### Automatic deployments
+
+Pushes and pull requests run the GitHub Actions workflow in `.github/workflows/ci.yml`. It installs the locked dependencies, runs the server test suite, and builds the production frontend. The Render Blueprint uses `autoDeployTrigger: checksPass`, so a push to `main` deploys only after this workflow succeeds.
+
+For an existing Render service created manually instead of from `render.yaml`, open its Settings page once and set **Auto-Deploy** to **After CI Checks Pass**. Keep the service branch set to `main`. No deploy-hook secret is required.
+
 ### Required production environment variables
 
 ```text

@@ -3,6 +3,8 @@ services:
     name: changer-timetable
     runtime: node
     plan: free
+    branch: main
+    autoDeployTrigger: checksPass
     buildCommand: npm ci && npm run build
     preDeployCommand: npm run deploy:init
     startCommand: npm start
