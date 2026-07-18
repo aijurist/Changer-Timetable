@@ -102,6 +102,40 @@ button {
   margin-left: auto;
 }
 
+.live-connection {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px;
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 0.76rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.live-connection > span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f4b942;
+  box-shadow: 0 0 0 3px rgba(244, 185, 66, 0.22);
+}
+
+.live-connection.connected > span {
+  background: #5ee0a0;
+  box-shadow: 0 0 0 3px rgba(94, 224, 160, 0.2);
+}
+
+.live-connection.reconnecting > span {
+  background: #ffca63;
+}
+
+.live-connection.unsupported > span {
+  background: #c9d2d8;
+  box-shadow: none;
+}
+
 .nav-button {
   min-height: 36px;
   border: 1px solid rgba(255, 255, 255, 0.45);

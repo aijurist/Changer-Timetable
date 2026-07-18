@@ -29,6 +29,7 @@ import { normalizeDay } from './time.js';
 import { createAuthRouter, requireAuth } from './auth.js';
 import { RESTORE_SESSION_SQL, restoreSessionParameters, sessionStateFromAuditSnapshot } from './restore.js';
 import { resolveSwapSessions } from './roomSwap.js';
+import { createLiveUpdateHub } from './liveUpdates.js';
 import {
   createTemporarySectionOverlap,
   getTemporaryConflictSessionIds,
@@ -39,6 +40,7 @@ import {
 } from './temporaryOverlaps.js';
 
 const app = express();
+const liveUpdates = createLiveUpdateHub();
 if (config.nodeEnv === 'production') app.set('trust proxy', 1);
 app.use(express.json({ limit: '2mb' }));
 
@@ -194,6 +196,8 @@ app.get('/api/health', async (_req, res, next) => {
     next(error);
   }
 });
+
+app.get('/api/events', liveUpdates.handle);
 
 app.use('/api/auth', createAuthRouter(pool, { secureCookies: config.nodeEnv === 'production' }));
 const adminOnly = requireAuth(pool);
@@ -532,6 +536,7 @@ app.post('/api/sessions/:id/balanced-split', adminOnly, async (req, res, next) =
       };
     });
 
+    liveUpdates.publish({ action: 'balanced_split', sessionIds: result.retainedSessions.map((session) => String(session.id)) });
     res.json({ success: true, ...result });
   } catch (error) {
     next(error);
@@ -909,6 +914,7 @@ app.post('/api/activity/:id/restore', adminOnly, async (req, res, next) => {
       };
     });
 
+    liveUpdates.publish({ action: 'restore', sessionIds: result.restoredSessionIds });
     res.json({ success: true, ...result });
   } catch (error) {
     next(error);
@@ -1185,6 +1191,9 @@ app.post('/api/sessions', adminOnly, async (req, res, next) => {
       };
     });
 
+    if (result.status < 300 && result.body?.success) {
+      liveUpdates.publish({ action: 'create', sessionIds: [String(result.body.session.id)] });
+    }
     res.status(result.status).json(result.body);
   } catch (error) {
     next(error);
@@ -1247,6 +1256,9 @@ app.delete('/api/sessions/:id', adminOnly, async (req, res, next) => {
       };
     });
 
+    if (result.status < 300 && result.body?.success) {
+      liveUpdates.publish({ action: 'delete', sessionIds: [String(req.params.id)] });
+    }
     res.status(result.status).json(result.body);
   } catch (error) {
     next(error);
@@ -1647,6 +1659,16 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
       };
     });
 
+    if (result.status < 300 && result.body?.success) {
+      liveUpdates.publish({
+        action: 'update',
+        sessionIds: [
+          String(result.body.session.id),
+          result.body.pairedSessionId,
+          result.body.batchSwappedSessionId
+        ].filter(Boolean)
+      });
+    }
     res.status(result.status).json(result.body);
   } catch (error) {
     next(error);
@@ -1886,6 +1908,17 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
       };
     });
 
+    if (result.status < 300 && result.body?.success) {
+      liveUpdates.publish({
+        action: 'room_swap',
+        sessionIds: [
+          result.body.session?.id,
+          result.body.swappedSession?.id,
+          result.body.pairedSession?.id,
+          result.body.swappedPairedSession?.id
+        ].filter(Boolean).map(String)
+      });
+    }
     res.status(result.status).json(result.body);
   } catch (error) {
     next(error);
@@ -2471,6 +2504,12 @@ let temporaryOverlapSweepPromise = null;
 function runTemporaryOverlapSweep() {
   if (!temporaryOverlapSweepPromise) {
     temporaryOverlapSweepPromise = reconcileTemporarySectionOverlaps(pool, { serializeSession })
+      .then((summary) => {
+        if (summary.resolved || summary.reverted || summary.failed) {
+          liveUpdates.publish({ action: 'temporary_overlap_reconcile', summary });
+        }
+        return summary;
+      })
       .catch((error) => {
         console.error('Temporary overlap reconciliation failed:', error);
         throw error;

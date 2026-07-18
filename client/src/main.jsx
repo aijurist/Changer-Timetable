@@ -192,6 +192,7 @@ function LoginPage({ onAuthenticated, onCancel }) {
 
 function ChangerApp({ authUser, onLogin, onLogout }) {
   const [exportDialog, setExportDialog] = useState(null);
+  const [liveStatus, setLiveStatus] = useState('connecting');
   const [showConflicts, setShowConflicts] = useState(false);
   const {
     page,
@@ -341,6 +342,56 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     refreshAll()
       .catch((error) => setNotice({ type: 'error', text: error.message }))
       .finally(() => setLoading(false));
+  }, [authUser?.id]);
+
+  useEffect(() => {
+    let refreshTimer = null;
+    let refreshingLive = false;
+    let queued = false;
+
+    async function refreshLiveData() {
+      if (refreshingLive) {
+        queued = true;
+        return;
+      }
+      refreshingLive = true;
+      try {
+        const state = useChangerStore.getState();
+        const requests = [api.meta(), api.conflicts(), api.sessions({ limit: 5000, compact: 1 })];
+        if (authUser) requests.push(api.temporaryOverlaps());
+        const [metaResult, conflictResult, sessionResult, overlapResult] = await Promise.all(requests);
+        setMeta(metaResult);
+        setConflicts(conflictResult);
+        setSessions(sessionResult.rows);
+        setTotal(sessionResult.total);
+        if (authUser) setTemporaryOverlaps(overlapResult);
+        if (state.selected && !sessionResult.rows.some((row) => row.id === state.selected.id)) closeEditor();
+        if (authUser && state.page === 'logs') {
+          await loadActivity(state.activityPage, state.activityPageSize, state.activityDepartment);
+        }
+        setLastLoadedAt(new Date());
+      } catch (error) {
+        setNotice({ type: 'error', text: `Live refresh failed: ${error.message}` });
+      } finally {
+        refreshingLive = false;
+        if (queued) {
+          queued = false;
+          refreshLiveData();
+        }
+      }
+    }
+
+    const unsubscribe = api.subscribeToTimetable(
+      () => {
+        window.clearTimeout(refreshTimer);
+        refreshTimer = window.setTimeout(refreshLiveData, 250);
+      },
+      setLiveStatus
+    );
+    return () => {
+      window.clearTimeout(refreshTimer);
+      unsubscribe();
+    };
   }, [authUser?.id]);
 
   useEffect(() => {
@@ -986,6 +1037,9 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
         </div>
         <div className="navbar-title">{page === 'logs' ? 'Change Logs' : 'Combined Schedule View'}</div>
         <div className="navbar-actions">
+          <span className={`live-connection ${liveStatus}`} title="Timetable changes from other users refresh automatically">
+            <span aria-hidden="true" /> {liveStatus === 'connected' ? 'Live' : liveStatus === 'unsupported' ? 'Manual' : 'Connecting'}
+          </span>
           <button className="nav-button" type="button" onClick={openExportDialog} title="Choose timetable data to export">
             <Download size={17} /> Export
           </button>

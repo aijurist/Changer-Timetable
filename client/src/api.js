@@ -42,6 +42,7 @@ export const api = {
   conflicts: () => request('/api/conflicts?limit=100'),
   activity: (params = {}) => request(`/api/activity?${new URLSearchParams(cleanParams(params))}`),
   temporaryOverlaps: () => request('/api/temporary-overlaps'),
+  subscribeToTimetable: (onChange, onStatus) => subscribeToTimetable(onChange, onStatus),
   exportFile: ({ type, format, departments = [], semester = '' }) => downloadExport({ type, format, departments, semester }),
   restoreActivity: (id) => request(`/api/activity/${id}/restore`, { method: 'POST' }),
   createSession: (payload) => request('/api/sessions', {
@@ -75,6 +76,24 @@ async function downloadExport({ type, format, departments, semester }) {
   const disposition = response.headers.get('content-disposition') || '';
   const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || `${type}_schedule.${format}`;
   return { blob: await response.blob(), filename };
+}
+
+function subscribeToTimetable(onChange, onStatus = () => {}) {
+  if (typeof EventSource === 'undefined') {
+    onStatus('unsupported');
+    return () => {};
+  }
+  const source = new EventSource(`${API_BASE}/api/events`, { withCredentials: true });
+  source.onopen = () => onStatus('connected');
+  source.onerror = () => onStatus('reconnecting');
+  source.addEventListener('timetable', (event) => {
+    try {
+      onChange(JSON.parse(event.data));
+    } catch {
+      onChange({ action: 'update' });
+    }
+  });
+  return () => source.close();
 }
 
 function cleanParams(params = {}) {
