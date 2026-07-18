@@ -937,6 +937,28 @@ input:focus,
   font-size: 0.88rem;
 }
 
+.logs-toolbar-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.logs-department-filter {
+  width: min(380px, 42vw);
+  display: grid;
+  gap: 5px;
+}
+
+.logs-department-filter > span {
+  color: #425260;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.logs-department-filter .searchable-select {
+  width: 100%;
+}
+
 .activity-header {
   display: flex;
   align-items: center;
@@ -1041,6 +1063,10 @@ input:focus,
 
 .activity-main .activity-change {
   color: #31556f;
+}
+
+.activity-main .activity-departments {
+  color: #52697a;
 }
 
 .logs-pagination {
@@ -2081,6 +2107,16 @@ input:focus,
   .logs-toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .logs-toolbar-actions {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .logs-department-filter {
+    width: 100%;
   }
 
   .navbar-actions {

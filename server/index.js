@@ -606,7 +606,8 @@ app.get('/api/activity', adminOnly, async (req, res, next) => {
   try {
     const limit = boundedInt(req.query.limit, 20, 1, 100);
     const offset = boundedInt(req.query.offset, 0, 0, 1000000);
-    const [result, summary] = await Promise.all([
+    const department = String(req.query.department || '').trim() || null;
+    const [result, summary, departments] = await Promise.all([
       pool.query(
       `SELECT
          er.id,
@@ -630,29 +631,66 @@ app.get('/api/activity', adminOnly, async (req, res, next) => {
          r.room_number,
          audit.before_payload AS audit_before_payload,
          audit.after_payload AS audit_after_payload,
-         audit.audit_count
+         audit.audit_count,
+         audit.departments AS audit_departments
        FROM edit_requests er
        LEFT JOIN sessions s ON s.id = er.session_id
        LEFT JOIN teachers t ON t.id = s.teacher_id
        LEFT JOIN rooms r ON r.id = s.room_id
        LEFT JOIN LATERAL (
-         SELECT sal.before_payload, sal.after_payload, (count(*) OVER ())::int AS audit_count
+         SELECT
+           (array_agg(sal.before_payload ORDER BY sal.id))[1] AS before_payload,
+           (array_agg(sal.after_payload ORDER BY sal.id))[1] AS after_payload,
+           count(*)::int AS audit_count,
+           array_remove(array_agg(DISTINCT coalesce(
+             sal.after_payload->>'department',
+             sal.before_payload->>'department'
+           )), NULL) AS departments
          FROM session_audit_log sal
          WHERE sal.edit_request_id = er.id
-         ORDER BY sal.id
-         LIMIT 1
        ) audit ON true
+       WHERE ($3::text IS NULL
+         OR $3 = ANY(coalesce(audit.departments, ARRAY[]::text[]))
+         OR s.department = $3
+         OR er.payload->>'department' = $3)
        ORDER BY er.created_at DESC
        LIMIT $1 OFFSET $2`,
-        [limit, offset]
+        [limit, offset, department]
       ),
       pool.query(
         `SELECT count(*)::int AS total,
-                count(*) FILTER (WHERE status = 'applied')::int AS applied,
-                count(*) FILTER (WHERE status = 'rejected')::int AS rejected,
-                count(*) FILTER (WHERE status = 'pending')::int AS pending,
-                count(*) FILTER (WHERE status = 'failed')::int AS failed
-         FROM edit_requests`
+                count(*) FILTER (WHERE er.status = 'applied')::int AS applied,
+                count(*) FILTER (WHERE er.status = 'rejected')::int AS rejected,
+                count(*) FILTER (WHERE er.status = 'pending')::int AS pending,
+                count(*) FILTER (WHERE er.status = 'failed')::int AS failed
+         FROM edit_requests er
+         LEFT JOIN sessions s ON s.id = er.session_id
+         WHERE ($1::text IS NULL
+           OR s.department = $1
+           OR er.payload->>'department' = $1
+           OR EXISTS (
+             SELECT 1
+             FROM session_audit_log sal
+             WHERE sal.edit_request_id = er.id
+               AND coalesce(sal.after_payload->>'department', sal.before_payload->>'department') = $1
+           ))`,
+        [department]
+      ),
+      pool.query(
+        `SELECT DISTINCT department
+         FROM (
+           SELECT s.department
+           FROM edit_requests er
+           JOIN sessions s ON s.id = er.session_id
+           UNION
+           SELECT nullif(er.payload->>'department', '') AS department
+           FROM edit_requests er
+           UNION
+           SELECT coalesce(sal.after_payload->>'department', sal.before_payload->>'department') AS department
+           FROM session_audit_log sal
+         ) activity_departments
+         WHERE department IS NOT NULL
+         ORDER BY department`
       )
     ]);
 
@@ -660,6 +698,8 @@ app.get('/api/activity', adminOnly, async (req, res, next) => {
       rows: result.rows.map(mapActivityRow),
       total: summary.rows[0].total,
       stats: summary.rows[0],
+      departments: departments.rows.map((row) => row.department),
+      department,
       limit,
       offset
     });
@@ -1960,6 +2000,9 @@ function mapActivityRow(row) {
     changes: describeAuditChanges(row.audit_before_payload, row.audit_after_payload),
     affectedSessions: Number(row.audit_count || 0),
     canRestore: row.status === 'applied' && Number(row.audit_count || 0) > 0,
+    departments: row.audit_departments?.length
+      ? row.audit_departments
+      : [snapshot.department || row.department || payload.department].filter(Boolean),
     session: {
       courseCode: snapshot.courseCode || row.course_code || payload.courseCode || null,
       courseName: snapshot.courseName || row.course_name || payload.courseName || null,

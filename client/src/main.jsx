@@ -230,6 +230,10 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     setActivityPage,
     activityPageSize,
     setActivityPageSize,
+    activityDepartment,
+    setActivityDepartment,
+    activityDepartments,
+    setActivityDepartments,
     restoringLogId,
     setRestoringLogId,
     lastLoadedAt,
@@ -269,22 +273,27 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     }
   }
 
-  async function loadActivity(pageNumber = activityPage, pageSize = activityPageSize) {
+  async function loadActivity(pageNumber = activityPage, pageSize = activityPageSize, department = activityDepartment) {
     if (!authUser) {
       setActivity([]);
       setActivityTotal(0);
       return;
     }
-    const result = await api.activity({ limit: pageSize, offset: (pageNumber - 1) * pageSize });
+    const result = await api.activity({
+      limit: pageSize,
+      offset: (pageNumber - 1) * pageSize,
+      department
+    });
     setActivity(result.rows);
     setActivityTotal(result.total);
     setActivityStats(result.stats);
+    setActivityDepartments(result.departments || []);
   }
 
   async function refreshActivityLogs() {
     setRefreshing(true);
     try {
-      await loadActivity(activityPage, activityPageSize);
+      await loadActivity(activityPage, activityPageSize, activityDepartment);
       setLastLoadedAt(new Date());
     } finally {
       setRefreshing(false);
@@ -311,9 +320,9 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
 
   useEffect(() => {
     if (!authUser || page !== 'logs') return;
-    loadActivity(activityPage, activityPageSize)
+    loadActivity(activityPage, activityPageSize, activityDepartment)
       .catch((error) => setNotice({ type: 'error', text: error.body?.message || error.message }));
-  }, [authUser?.id, page, activityPage, activityPageSize]);
+  }, [authUser?.id, page, activityPage, activityPageSize, activityDepartment]);
 
   useEffect(() => {
     if (!notice) return undefined;
@@ -641,7 +650,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     try {
       const result = await api.restoreActivity(item.id);
       setActivityPage(1);
-      await Promise.all([loadMeta(), loadSessions(filters), loadActivity(1, activityPageSize)]);
+      await Promise.all([loadMeta(), loadSessions(filters), loadActivity(1, activityPageSize, activityDepartment)]);
       setNotice({
         type: 'success',
         text: `${result.restoredSessionIds.length} session${result.restoredSessionIds.length === 1 ? '' : 's'} restored successfully.`
@@ -912,9 +921,12 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
             stats={activityStats}
             page={activityPage}
             pageSize={activityPageSize}
+            department={activityDepartment}
+            departments={activityDepartments}
             lastLoadedAt={lastLoadedAt}
             onPageChange={setActivityPage}
             onPageSizeChange={setActivityPageSize}
+            onDepartmentChange={setActivityDepartment}
             onRestore={restoreLogEntry}
             restoringLogId={restoringLogId}
             onRefresh={refreshActivityLogs}
@@ -1242,7 +1254,7 @@ function formatConflictType(type) {
   return 'Conflict';
 }
 
-function LogsPage({ activity, total, stats, page, pageSize, lastLoadedAt, onPageChange, onPageSizeChange, onRestore, restoringLogId, onRefresh, refreshing }) {
+function LogsPage({ activity, total, stats, page, pageSize, department, departments, lastLoadedAt, onPageChange, onPageSizeChange, onDepartmentChange, onRestore, restoringLogId, onRefresh, refreshing }) {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   return (
@@ -1260,9 +1272,24 @@ function LogsPage({ activity, total, stats, page, pageSize, lastLoadedAt, onPage
           <h2>Change Logs</h2>
           <span>{lastLoadedAt ? `Last refreshed ${lastLoadedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'No refresh yet'}</span>
         </div>
-        <button className="tiny-action" onClick={onRefresh} disabled={refreshing}>
-          <RefreshCw size={14} className={refreshing ? 'spin-slow' : ''} /> Refresh Logs
-        </button>
+        <div className="logs-toolbar-actions">
+          <label className="logs-department-filter">
+            <span>Department</span>
+            <SearchableSelect
+              value={department}
+              options={[
+                { value: '', label: 'All Departments', searchText: 'all departments' },
+                ...departments.map((value) => ({ value, label: value, searchText: value }))
+              ]}
+              placeholder="Search department"
+              emptyLabel="All Departments"
+              onChange={onDepartmentChange}
+            />
+          </label>
+          <button className="tiny-action" onClick={onRefresh} disabled={refreshing}>
+            <RefreshCw size={14} className={refreshing ? 'spin-slow' : ''} /> Refresh Logs
+          </button>
+        </div>
       </section>
 
       <ActivityPanel activity={activity} onRestore={onRestore} restoringLogId={restoringLogId} />
@@ -1304,6 +1331,7 @@ function ActivityPanel({ activity, onRestore, restoringLogId }) {
                 {formatActivitySession(item.session)}
                 {item.requestedBy ? ` by ${item.requestedBy}` : ''}
               </span>
+              {item.departments?.length > 1 && <small className="activity-departments">Departments: {item.departments.join(' / ')}</small>}
               {item.message && <small>{item.message}{item.messageCount > 1 ? ` (+${item.messageCount - 1} more)` : ''}</small>}
               {item.changes?.map((change) => <small className="activity-change" key={change}>{change}</small>)}
               {item.affectedSessions > 1 && <small className="affected-count">Affected {item.affectedSessions} sessions</small>}
