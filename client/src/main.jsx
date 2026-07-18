@@ -721,8 +721,12 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
       room.occupyingTeacherName ? `Staff: ${room.occupyingTeacherName}` : null,
       room.occupyingTimeLabel ? `Time: ${titleCase(draft.day)} ${room.occupyingTimeLabel}` : null
     ].filter(Boolean).join('\n');
+    const selectedCourses = [selected, draft.pairedSession]
+      .filter(Boolean)
+      .map((session) => `${session.courseCode} (${session.teacherName || 'Staff TBA'})`)
+      .join(' + ');
     const confirmed = window.confirm(
-      `Confirm room swap?\n\nSelected session:\n${selected.courseCode} - ${selected.courseName}\nStaff: ${selected.teacherName || '-'}\nFrom: ${selected.roomNumber || '-'}\nTo: ${room.roomNumber}\n\nCurrent occupant of ${room.roomNumber}:\n${occupantDetails}\n\nAfter swap:\n${selected.courseCode} uses ${room.roomNumber}\n${room.occupyingCourseCode || 'Booked session'} uses ${selected.roomNumber || 'the current room'}`
+      `Confirm room swap?\n\nSelected session${draft.pairedSession ? ' bundle' : ''}:\n${selectedCourses}\nFrom: ${selected.roomNumber || '-'}\nTo: ${room.roomNumber}\n\nCurrent occupant of ${room.roomNumber}:\n${occupantDetails}\n\nAfter swap:\n${selectedCourses} use ${room.roomNumber}\n${room.occupyingCourseCode || 'Booked session'} uses ${selected.roomNumber || 'the current room'}`
     );
     if (!confirmed) return;
 
@@ -1360,7 +1364,6 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
     String(draft.roomId) !== String(selected.roomId)
   );
   const canSwapRoom = selectedRoom &&
-    !pairedSession &&
     !selectedRoom.isAvailable &&
     selectedRoom.occupyingSessionId &&
     String(selectedRoom.occupyingSessionId) !== String(draft.id) &&

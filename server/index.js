@@ -1510,22 +1510,60 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
       );
       const requestId = request.rows[0].id;
 
-      const ids = [sessionId, payload.otherSessionId].sort((a, b) => a - b);
+      const lookup = await client.query(
+        'SELECT * FROM sessions WHERE id = ANY($1::bigint[])',
+        [[sessionId, payload.otherSessionId]]
+      );
+      if (lookup.rowCount !== 2) throw new HttpError(404, 'One of the sessions was not found.');
+
+      const lookupSessions = resolveSwapSessions(lookup.rows, sessionId, payload.otherSessionId);
+      if (!lookupSessions.current || !lookupSessions.other) {
+        throw new HttpError(404, 'One of the sessions was not found.');
+      }
+      const currentPairLookup = await findPairedOccurrence(client, lookupSessions.current);
+      const otherPairLookup = await findPairedOccurrence(client, lookupSessions.other);
+      if (isPairedSectionSession(lookupSessions.current) && !currentPairLookup) {
+        await rejectEdit(client, requestId, 'paired_session_missing', { sessionId });
+        return { status: 409, body: { success: false, message: 'The selected 25 + 25 partner session could not be found. Refresh and try again.' } };
+      }
+      if (isPairedSectionSession(lookupSessions.other) && !otherPairLookup) {
+        await rejectEdit(client, requestId, 'paired_occupant_missing', { otherSessionId: payload.otherSessionId });
+        return { status: 409, body: { success: false, message: 'The booked session has a missing 25 + 25 partner. Refresh and try again.' } };
+      }
+
+      const ids = [...new Set([
+        sessionId,
+        payload.otherSessionId,
+        currentPairLookup?.id,
+        otherPairLookup?.id
+      ].filter(Boolean).map(Number))].sort((a, b) => a - b);
       const locked = await client.query(
-        `SELECT *
-         FROM sessions
+        `SELECT * FROM sessions
          WHERE id = ANY($1::bigint[])
          ORDER BY id
          FOR UPDATE`,
         [ids]
       );
-      if (locked.rowCount !== 2) throw new HttpError(404, 'One of the sessions was not found.');
+      if (locked.rowCount !== ids.length) throw new HttpError(404, 'One of the sessions was not found.');
 
-      const { current, other } = resolveSwapSessions(locked.rows, sessionId, payload.otherSessionId);
-      if (!current || !other) throw new HttpError(404, 'One of the sessions was not found.');
-      if (current.status !== 'active' || other.status !== 'active') {
+      const { current, other, currentPair, otherPair, currentUnit, otherUnit } = resolveSwapSessions(
+        locked.rows,
+        sessionId,
+        payload.otherSessionId,
+        currentPairLookup?.id,
+        otherPairLookup?.id
+      );
+      if (!current || !other || (currentPairLookup && !currentPair) || (otherPairLookup && !otherPair)) {
+        throw new HttpError(404, 'One of the sessions was not found.');
+      }
+      if ((currentPair && !isReciprocalPairedOccurrence(current, currentPair)) ||
+          (otherPair && !isReciprocalPairedOccurrence(other, otherPair))) {
+        await rejectEdit(client, requestId, 'paired_session_changed', { ids });
+        return { status: 409, body: { success: false, message: 'A paired 25 + 25 session changed while the swap was prepared. Refresh and try again.' } };
+      }
+      if ([...currentUnit, ...otherUnit].some((session) => session.status !== 'active')) {
         await rejectEdit(client, requestId, 'inactive_session', { sessionId, otherSessionId: payload.otherSessionId });
-        return { status: 409, body: { success: false, message: 'Both sessions must be active before rooms can be swapped.' } };
+        return { status: 409, body: { success: false, message: 'Every session in both room groups must be active before rooms can be swapped.' } };
       }
 
       if (payload.rowVersion && payload.rowVersion !== current.row_version) {
@@ -1534,7 +1572,13 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
         return { status: 409, body: { success: false, message: 'Session was updated by someone else. Refresh and try again.', details } };
       }
 
-      if (current.room_id === other.room_id) {
+      const currentRoomIds = new Set(currentUnit.map((session) => Number(session.room_id)));
+      const otherRoomIds = new Set(otherUnit.map((session) => Number(session.room_id)));
+      if (currentRoomIds.size !== 1 || otherRoomIds.size !== 1) {
+        await rejectEdit(client, requestId, 'paired_room_mismatch', { ids });
+        return { status: 409, body: { success: false, message: 'A paired 25 + 25 session is split across rooms. Fix that bundle before swapping.' } };
+      }
+      if (Number(current.room_id) === Number(other.room_id)) {
         await rejectEdit(client, requestId, 'same_room', { roomId: current.room_id });
         return { status: 409, body: { success: false, message: 'Both sessions already use the same room.' } };
       }
@@ -1546,8 +1590,8 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
       const currentNextCapacity = getRoomCapacity(otherRoom.rows[0].room_number, otherRoom.rows[0]) ?? current.capacity;
       const otherNextCapacity = getRoomCapacity(currentRoom.rows[0].room_number, currentRoom.rows[0]) ?? other.capacity;
       const capacityConflicts = [
-        { session: current, capacity: currentNextCapacity, roomNumber: otherRoom.rows[0].room_number },
-        { session: other, capacity: otherNextCapacity, roomNumber: currentRoom.rows[0].room_number }
+        ...currentUnit.map((session) => ({ session, capacity: currentNextCapacity, roomNumber: otherRoom.rows[0].room_number })),
+        ...otherUnit.map((session) => ({ session, capacity: otherNextCapacity, roomNumber: currentRoom.rows[0].room_number }))
       ].filter(({ session, capacity }) => {
         const effectiveCount = effectiveStudentCount(session);
         return !session.allow_capacity_override && effectiveCount > 0 && capacity && effectiveCount > Number(capacity);
@@ -1566,8 +1610,8 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
       }
 
       await lockResources(client, [
-        ...buildResourceKeys(current, { ...current, room_id: other.room_id }),
-        ...buildResourceKeys(other, { ...other, room_id: current.room_id })
+        ...currentUnit.flatMap((session) => buildResourceKeys(session, { ...session, room_id: other.room_id })),
+        ...otherUnit.flatMap((session) => buildResourceKeys(session, { ...session, room_id: current.room_id }))
       ]);
 
       const thirdPartyConflicts = await client.query(
@@ -1591,7 +1635,7 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
            )
          LIMIT 1`,
         [
-          [sessionId, payload.otherSessionId],
+          ids,
           other.room_id,
           current.day,
           current.start_minute,
@@ -1612,8 +1656,8 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
         };
       }
 
-      const beforeCurrent = await serializeSession(client, sessionId);
-      const beforeOther = await serializeSession(client, payload.otherSessionId);
+      const beforePayloads = new Map();
+      for (const id of ids) beforePayloads.set(id, await serializeSession(client, id));
       await client.query("SET LOCAL app.seed_mode = 'on'");
       await client.query(
         `UPDATE sessions
@@ -1623,9 +1667,9 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
              row_version = row_version + 1,
              updated_at = now(),
              updated_by = $5
-         WHERE id = $1`,
+         WHERE id = ANY($1::bigint[])`,
         [
-          sessionId,
+          currentUnit.map((session) => Number(session.id)),
           other.room_id,
           currentNextCapacity,
           otherRoom.rows[0].allow_conflicts,
@@ -1640,9 +1684,9 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
              row_version = row_version + 1,
              updated_at = now(),
              updated_by = $5
-         WHERE id = $1`,
+         WHERE id = ANY($1::bigint[])`,
         [
-          payload.otherSessionId,
+          otherUnit.map((session) => Number(session.id)),
           current.room_id,
           otherNextCapacity,
           currentRoom.rows[0].allow_conflicts,
@@ -1650,26 +1694,31 @@ app.post('/api/sessions/:id/swap-room', adminOnly, async (req, res, next) => {
         ]
       );
 
-      const afterCurrent = await serializeSession(client, sessionId);
-      const afterOther = await serializeSession(client, payload.otherSessionId);
-      await client.query(
-        `INSERT INTO session_audit_log (session_id, edit_request_id, changed_by, before_payload, after_payload)
-         VALUES ($1, $2, $3, $4, $5), ($6, $2, $3, $7, $8)`,
-        [sessionId, requestId, updatedBy || null, beforeCurrent, afterCurrent, payload.otherSessionId, beforeOther, afterOther]
-      );
+      const afterPayloads = new Map();
+      for (const id of ids) {
+        const afterPayload = await serializeSession(client, id);
+        afterPayloads.set(id, afterPayload);
+        await client.query(
+          `INSERT INTO session_audit_log (session_id, edit_request_id, changed_by, before_payload, after_payload)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [id, requestId, updatedBy || null, beforePayloads.get(id), afterPayload]
+        );
+      }
       await client.query(
         `UPDATE edit_requests
          SET status = 'applied', result = $2, completed_at = now()
          WHERE id = $1`,
-        [requestId, { action: 'swap_room', swappedWith: payload.otherSessionId }]
+        [requestId, { action: 'swap_room', swappedWith: payload.otherSessionId, affectedSessionIds: ids }]
       );
 
       return {
         status: 200,
         body: {
           success: true,
-          session: afterCurrent,
-          swappedSession: afterOther,
+          session: afterPayloads.get(sessionId),
+          swappedSession: afterPayloads.get(payload.otherSessionId),
+          pairedSession: currentPair ? afterPayloads.get(Number(currentPair.id)) : null,
+          swappedPairedSession: otherPair ? afterPayloads.get(Number(otherPair.id)) : null,
           editRequestId: requestId
         }
       };
