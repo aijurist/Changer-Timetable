@@ -301,8 +301,8 @@ async function markSourceOverlapStatus(client, sourceEditRequestId, status, fail
   await client.query(
     `UPDATE edit_requests
      SET result = coalesce(result, '{}'::jsonb) || jsonb_build_object(
-       'temporaryOverlapStatus', $2,
-       'temporaryOverlapFailure', $3
+       'temporaryOverlapStatus', $2::text,
+       'temporaryOverlapFailure', $3::text
      )
      WHERE id = $1`,
     [sourceEditRequestId, status, failureReason]
