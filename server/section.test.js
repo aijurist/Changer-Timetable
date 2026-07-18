@@ -9,7 +9,8 @@ import {
   hasSamePairedCourseSet,
   isApprovedDbmsOopsOverlap,
   isPairedSectionSession,
-  isReciprocalPairedOccurrence
+  isReciprocalPairedOccurrence,
+  resolveManualSectionIndex
 } from './section.js';
 
 test('derives section identity from the suffixed source instance key', () => {
@@ -29,6 +30,13 @@ test('derives section identity from the suffixed source instance key', () => {
   assert.equal(getSectionLabel(session), 'C');
   assert.equal(getSectionKey(session), 'Computer Science and Engineering:semester-3:section-2');
   assert.equal(isPairedSectionSession(session), true);
+});
+
+test('requires an explicit or inferred section for manual semester 3 sessions', () => {
+  assert.equal(resolveManualSectionIndex({ semester: 3, sectionIndex: 0 }), 0);
+  assert.equal(resolveManualSectionIndex({ semester: 3 }, 7), 7);
+  assert.equal(resolveManualSectionIndex({ semester: 3 }), null);
+  assert.equal(resolveManualSectionIndex({ semester: 5, sectionIndex: 2 }), null);
 });
 
 test('only approves the Semester 3 DBMS/OOPS overlap across different sections in one department', () => {

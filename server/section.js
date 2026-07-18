@@ -16,6 +16,16 @@ export function getSectionIndex(session) {
   return match ? Number(match[1]) : null;
 }
 
+export function resolveManualSectionIndex(session, inferredIndex = null) {
+  if (Number(session?.semester) !== 3) return null;
+  for (const value of [session?.sectionIndex, session?.section_index, inferredIndex]) {
+    if (value === null || value === undefined || value === '') continue;
+    const index = Number(value);
+    if (Number.isInteger(index) && index >= 0) return index;
+  }
+  return null;
+}
+
 export function getSectionLabel(session) {
   const index = getSectionIndex(session);
   return index === null ? null : indexToLetters(index);

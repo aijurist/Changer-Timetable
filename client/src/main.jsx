@@ -29,6 +29,7 @@ import {
   X
 } from 'lucide-react';
 import { api } from './api.js';
+import { filtersForVisibleSession } from './sessionVisibility.js';
 import { useChangerStore } from './store.js';
 import './styles.css';
 
@@ -254,6 +255,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
     setRefreshing,
     saving,
     setSaving,
+    setFilters,
     updateFilter,
     resetFilters,
     closeEditor,
@@ -280,6 +282,11 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
       if (!refreshed) closeEditor();
       else setSelected(refreshed);
     }
+  }
+
+  function revealSession(session) {
+    if (!session) return;
+    setFilters((current) => filtersForVisibleSession(current, session));
   }
 
   async function loadCourseCatalog() {
@@ -564,7 +571,11 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
   );
   const createCourses = useMemo(
     () => createDraft ? getCoursesForSelection(sessions, courseCatalog, createDraft) : [],
-    [sessions, courseCatalog, createDraft?.department, createDraft?.semester, createDraft?.scheduleType]
+    [sessions, courseCatalog, createDraft?.department, createDraft?.semester, createDraft?.sectionIndex, createDraft?.scheduleType]
+  );
+  const createSections = useMemo(
+    () => createDraft ? getSectionsForDepartment(sessions, createDraft.department) : [],
+    [sessions, createDraft?.department]
   );
   const createDays = useMemo(
     () => createDraft ? getAllowedDays(meta, createDraft.department) : meta?.days || [],
@@ -617,6 +628,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
       slotKey: slot?.slot_key || '',
       department,
       semester: seedSession?.semester || filters.semester || '',
+      sectionIndex: seedSession?.sectionIndex ?? (filters.section === '' ? '' : Number(filters.section)),
       groupName: seedSession?.groupName || filters.group || '',
       groupIndex: seedSession?.groupIndex ?? '',
       dayPattern: seedSession?.dayPattern || filters.dayPattern || getDayPatternLabel(days),
@@ -704,6 +716,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
         ? new Date(result.temporaryOverlap.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         : null;
       closeEditor();
+      revealSession(result.session);
       setNotice({
         type: 'success',
         text: overlapExpiry
@@ -886,6 +899,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
       }
       if (key === 'department') {
         next.semester = '';
+        next.sectionIndex = '';
         next.courseKey = '';
         next.courseInstanceId = '';
         next.courseCode = '';
@@ -895,6 +909,16 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
         next.teacherId = '';
       }
       if (key === 'semester') {
+        next.sectionIndex = '';
+        next.courseKey = '';
+        next.courseInstanceId = '';
+        next.courseCode = '';
+        next.courseName = '';
+        next.groupName = '';
+        next.groupIndex = '';
+        next.teacherId = '';
+      }
+      if (key === 'sectionIndex') {
         next.courseKey = '';
         next.courseInstanceId = '';
         next.courseCode = '';
@@ -952,6 +976,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
         slotKey: createDraft.slotKey,
         department: createDraft.department,
         semester: toOptionalNumber(createDraft.semester),
+        sectionIndex: toOptionalNumber(createDraft.sectionIndex),
         groupName: createDraft.groupName || null,
         groupIndex: toOptionalNumber(createDraft.groupIndex),
         dayPattern: createDraft.dayPattern || null,
@@ -969,6 +994,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
         coScheduleInfo: createDraft.coScheduleInfo || null,
         updatedBy: createDraft.updatedBy || 'staff'
       });
+      revealSession(result.session);
       setNotice({
         type: 'success',
         text: result.warnings?.length ? `Session added with ${result.warnings.length} warning(s).` : 'Session added successfully.'
@@ -1243,6 +1269,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
           days={createDays}
           departments={filterValues.departments}
           semesters={createSemesters}
+          sections={createSections}
           courses={createCourses}
           saving={saving}
           onChange={updateCreateDraft}
@@ -1970,10 +1997,12 @@ function BalancedSplitModal({ wizard, saving, onChange, onClose, onConfirm }) {
   );
 }
 
-function AddSessionModal({ draft, slots, rooms, teachers, days, departments, semesters, courses, saving, onChange, onBatchChange, onClose, onSave }) {
+function AddSessionModal({ draft, slots, rooms, teachers, days, departments, semesters, sections, courses, saving, onChange, onBatchChange, onClose, onSave }) {
+  const needsSection = String(draft.semester) === '3';
   const canSave = draft.courseCode.trim() &&
     draft.courseName.trim() &&
     draft.department.trim() &&
+    (!needsSection || draft.sectionIndex !== '') &&
     draft.teacherId &&
     draft.roomId &&
     draft.day &&
@@ -2020,6 +2049,15 @@ function AddSessionModal({ draft, slots, rooms, teachers, days, departments, sem
             </label>
           </div>
 
+          {needsSection && (
+            <label>Section
+              <select value={draft.sectionIndex} onChange={(event) => onChange('sectionIndex', event.target.value === '' ? '' : Number(event.target.value))}>
+                <option value="">Select section</option>
+                {sections.map((section) => <option key={section.index} value={section.index}>Section {section.label}</option>)}
+              </select>
+            </label>
+          )}
+
           <label>Course
             <SearchableSelect
               value={draft.courseKey}
@@ -2030,7 +2068,7 @@ function AddSessionModal({ draft, slots, rooms, teachers, days, departments, sem
               }))}
               placeholder="Search subject code/name"
               emptyLabel="Select course"
-              disabled={!draft.department || !draft.semester}
+              disabled={!draft.department || !draft.semester || (needsSection && draft.sectionIndex === '')}
               onChange={(value) => onChange('courseKey', value)}
             />
           </label>
@@ -2073,10 +2111,12 @@ function AddSessionModal({ draft, slots, rooms, teachers, days, departments, sem
             />
           </label>
 
-          <div className="form-grid">
-            <label>Group<input value={draft.groupName} onChange={(event) => onChange('groupName', event.target.value)} placeholder="Department_S5_G1" /></label>
-            <label>Group Index<input type="number" min="0" value={draft.groupIndex} onChange={(event) => onChange('groupIndex', event.target.value)} /></label>
-          </div>
+          {!needsSection && (
+            <div className="form-grid">
+              <label>Group<input value={draft.groupName} onChange={(event) => onChange('groupName', event.target.value)} placeholder="Department_S5_G1" /></label>
+              <label>Group Index<input type="number" min="0" value={draft.groupIndex} onChange={(event) => onChange('groupIndex', event.target.value)} /></label>
+            </div>
+          )}
 
           <div className="form-grid">
             <label>Day Pattern<input value={draft.dayPattern} onChange={(event) => onChange('dayPattern', event.target.value)} placeholder="Monday-Fri" /></label>
@@ -2627,6 +2667,8 @@ function getCoursesForSelection(rows, catalog, draft) {
     if (session.scheduleType !== draft.scheduleType) continue;
     if (draft.department && session.department !== draft.department) continue;
     if (draft.semester && String(session.semester) !== String(draft.semester)) continue;
+    if (String(draft.semester) === '3' && draft.sectionIndex !== '' &&
+      (session.sectionIndex === null || session.sectionIndex === undefined || Number(session.sectionIndex) !== Number(draft.sectionIndex))) continue;
     if (!session.courseCode || !session.courseName) continue;
 
     const key = `${session.courseCode}|${session.courseName}`;
@@ -2662,6 +2704,8 @@ function pickTeacherForCourse(teachers, rows, draft) {
         session.scheduleType === draft.scheduleType &&
         session.department === draft.department &&
         String(session.semester || '') === String(draft.semester || '') &&
+        (String(draft.semester) !== '3' || draft.sectionIndex === '' ||
+          (session.sectionIndex !== null && session.sectionIndex !== undefined && Number(session.sectionIndex) === Number(draft.sectionIndex))) &&
         session.courseCode === draft.courseCode &&
         session.courseName === draft.courseName
       )

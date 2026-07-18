@@ -78,6 +78,7 @@ export const useChangerStore = create((set) => ({
   setLoading: (loading) => set({ loading }),
   setRefreshing: (refreshing) => set({ refreshing }),
   setSaving: (saving) => set({ saving }),
+  setFilters: (filters) => set((state) => ({ filters: resolveUpdate(filters, state.filters) })),
 
   updateFilter: (key, value) => set((state) => {
     const next = { ...state.filters, [key]: value };

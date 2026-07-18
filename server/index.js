@@ -23,7 +23,8 @@ import {
   getSectionLabel,
   getSourceCourseInstanceKey,
   isPairedSectionSession,
-  isReciprocalPairedOccurrence
+  isReciprocalPairedOccurrence,
+  resolveManualSectionIndex
 } from './section.js';
 import { normalizeDay } from './time.js';
 import { createAuthRouter, requireAuth } from './auth.js';
@@ -101,6 +102,7 @@ const sessionCreateSchema = z.object({
   slotKey: z.string().min(1),
   department: z.string().trim().min(1).max(180),
   semester: z.union([z.coerce.number().int().positive(), z.null()]).optional(),
+  sectionIndex: z.union([z.coerce.number().int().nonnegative(), z.null()]).optional(),
   groupName: z.union([z.string().trim().max(220), z.null()]).optional(),
   groupIndex: z.union([z.coerce.number().int().nonnegative(), z.null()]).optional(),
   dayPattern: z.union([z.string().trim().max(120), z.null()]).optional(),
@@ -1052,6 +1054,26 @@ app.post('/api/sessions', adminOnly, async (req, res, next) => {
       if (!slot) throw new HttpError(400, 'Selected slot does not exist');
 
       const groupName = payload.groupName || null;
+      let inferredSectionIndex = null;
+      if (Number(payload.semester) === 3 && payload.sectionIndex == null && groupName) {
+        const sectionRows = await client.query(
+          `SELECT DISTINCT section_index
+           FROM sessions
+           WHERE status = 'active'
+             AND semester = 3
+             AND department = $1
+             AND group_name = $2
+             AND section_index IS NOT NULL
+           ORDER BY section_index
+           LIMIT 2`,
+          [payload.department, groupName]
+        );
+        if (sectionRows.rowCount === 1) inferredSectionIndex = sectionRows.rows[0].section_index;
+      }
+      const sectionIndex = resolveManualSectionIndex(payload, inferredSectionIndex);
+      if (Number(payload.semester) === 3 && sectionIndex === null) {
+        throw new HttpError(400, 'Select a section before adding a Semester 3 session.');
+      }
       if (groupName) {
         await client.query(
           `INSERT INTO student_groups (name, department, semester, group_index)
@@ -1083,7 +1105,7 @@ app.post('/api/sessions', adminOnly, async (req, res, next) => {
         tutorial_hours: payload.tutorialHours ?? null,
         teacher_id: payload.teacherId,
         room_id: payload.roomId,
-        day: payload.day,
+        day: normalizeDay(payload.day),
         slot_key: slot.slot_key,
         slot_index: slot.slot_index,
         session_name: payload.scheduleType === 'lab' ? slot.slot_key : null,
@@ -1102,6 +1124,7 @@ app.post('/api/sessions', adminOnly, async (req, res, next) => {
         group_index: payload.groupIndex ?? parseGroupIndex(groupName),
         department: payload.department,
         semester: payload.semester ?? null,
+        section_index: sectionIndex,
         day_pattern: payload.dayPattern ?? null,
         is_co_scheduled: false,
         co_schedule_info: payload.coScheduleInfo ?? null,
@@ -1136,7 +1159,7 @@ app.post('/api/sessions', adminOnly, async (req, res, next) => {
           practical_hours, lecture_hours, tutorial_hours, teacher_id, room_id, day, slot_key,
           slot_index, session_name, time_label, start_minute, end_minute, student_count,
           total_students, capacity, is_batched, batch_info, num_batches, batch_number, batch_label,
-          group_name, group_index, department, semester, day_pattern, is_co_scheduled,
+          group_name, group_index, department, semester, section_index, day_pattern, is_co_scheduled,
           co_schedule_info, raw_payload, allow_room_conflicts, allow_capacity_override, updated_by
         )
         VALUES (
@@ -1144,7 +1167,7 @@ app.post('/api/sessions', adminOnly, async (req, res, next) => {
           (SELECT coalesce(max(source_index), 0) + 1 FROM sessions WHERE source_file = 'manual'),
           $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
           $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29,
-          $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40
+          $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41
         )
         RETURNING id`,
         [
@@ -1181,6 +1204,7 @@ app.post('/api/sessions', adminOnly, async (req, res, next) => {
           nextSession.group_index,
           nextSession.department,
           nextSession.semester,
+          nextSession.section_index,
           nextSession.day_pattern,
           nextSession.is_co_scheduled,
           nextSession.co_schedule_info,
