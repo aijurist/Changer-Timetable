@@ -7,6 +7,27 @@ export function effectiveStudentCount(session) {
   return Math.ceil(count / Math.max(Number(session.num_batches || 2), 1));
 }
 
+export function getLabBatchNumber(session) {
+  const scheduleType = session?.schedule_type ?? session?.scheduleType;
+  const isBatched = session?.is_batched ?? session?.isBatched;
+  if (scheduleType !== 'lab' || !isBatched) return null;
+
+  const explicit = Number(session?.batch_number ?? session?.batchNumber);
+  if (explicit === 1 || explicit === 2) return explicit;
+  const label = String(
+    session?.batch_label ?? session?.batchLabel ?? session?.batch_info ?? session?.batchInfo ?? ''
+  ).toLowerCase();
+  const match = label.match(/batch\s*([12])/);
+  return match ? Number(match[1]) : null;
+}
+
+export function compareLabBatches(left, right) {
+  const leftBatch = getLabBatchNumber(left);
+  const rightBatch = getLabBatchNumber(right);
+  if (!leftBatch || !rightBatch) return null;
+  return leftBatch === rightBatch ? 'same' : 'different';
+}
+
 export async function findSessionConflicts(client, nextSession, excludeSessionId) {
   const conflicts = [];
   const warnings = [];
@@ -74,7 +95,8 @@ export async function findSessionConflicts(client, nextSession, excludeSessionId
   const sectionIndex = getSectionIndex(nextSession);
   if (sectionIndex !== null) {
     const sectionRows = await client.query(
-      `SELECT id, course_code, course_name, time_label, day
+      `SELECT id, course_code, course_name, time_label, day, schedule_type,
+              is_batched, batch_number, batch_label, batch_info
        FROM sessions
        WHERE status = 'active'
          AND NOT (id = ANY($1::bigint[]))
@@ -89,6 +111,17 @@ export async function findSessionConflicts(client, nextSession, excludeSessionId
     );
 
     for (const row of sectionRows.rows) {
+      const batchRelation = compareLabBatches(nextSession, row);
+      if (batchRelation === 'different') continue;
+      if (batchRelation === 'same') {
+        const batchNumber = getLabBatchNumber(nextSession);
+        conflicts.push({
+          type: 'batch_conflict',
+          message: `Section ${getSectionLabelFromIndex(sectionIndex)} already has Batch ${batchNumber} for ${row.course_code} at ${row.time_label}.`,
+          session: row
+        });
+        continue;
+      }
       conflicts.push({
         type: 'section_conflict',
         message: `Section ${getSectionLabelFromIndex(sectionIndex)} also has ${row.course_code} at ${row.time_label}.`,
@@ -97,7 +130,8 @@ export async function findSessionConflicts(client, nextSession, excludeSessionId
     }
   } else if (nextSession.group_name) {
     const groupRows = await client.query(
-      `SELECT id, course_code, course_name, time_label, day
+      `SELECT id, course_code, course_name, time_label, day, schedule_type,
+              is_batched, batch_number, batch_label, batch_info
        FROM sessions
        WHERE status = 'active'
          AND NOT (id = ANY($1::bigint[]))
@@ -110,6 +144,17 @@ export async function findSessionConflicts(client, nextSession, excludeSessionId
     );
 
     for (const row of groupRows.rows) {
+      const batchRelation = compareLabBatches(nextSession, row);
+      if (batchRelation === 'different') continue;
+      if (batchRelation === 'same') {
+        const batchNumber = getLabBatchNumber(nextSession);
+        conflicts.push({
+          type: 'batch_conflict',
+          message: `${nextSession.group_name} already has Batch ${batchNumber} for ${row.course_code} at ${row.time_label}.`,
+          session: row
+        });
+        continue;
+      }
       warnings.push({
         type: row.course_code === nextSession.course_code ? 'group_course_overlap' : 'multiple_courses_in_group',
         message: `${nextSession.group_name} also has ${row.course_code} at ${row.time_label}.`,

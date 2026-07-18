@@ -1778,6 +1778,35 @@ input:focus,
   box-shadow: inset 0 0 0 1px rgba(33, 133, 197, 0.18);
 }
 
+.batch-conflict-panel {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 11px 12px;
+  border: 1px solid #edbb69;
+  border-radius: 7px;
+  color: #7a4a08;
+  background: #fff8e8;
+}
+
+.batch-conflict-panel > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.batch-conflict-panel > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.batch-conflict-panel span {
+  color: #8a5b1a;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
 .swap-room-panel {
   display: flex;
   align-items: center;

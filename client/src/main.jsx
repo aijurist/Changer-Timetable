@@ -414,6 +414,10 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
   );
   const hasFilters = useMemo(() => Object.values(filters).some(Boolean), [filters]);
   const slots = draft?.scheduleType === 'lab' ? meta?.labSessions || [] : meta?.theorySlots || [];
+  const batchConflict = useMemo(
+    () => findBatchConflictSession(sessions, selected, draft, slots),
+    [sessions, selected, draft, slots]
+  );
   const createCourses = useMemo(
     () => createDraft ? getCoursesForSelection(sessions, createDraft) : [],
     [sessions, createDraft?.department, createDraft?.semester, createDraft?.scheduleType]
@@ -498,6 +502,18 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
 
   async function saveDraft() {
     if (!draft) return;
+    const targetBatch = getBatchNumber(draft);
+    const replacementBatch = targetBatch === 1 ? 2 : 1;
+    if (batchConflict) {
+      const confirmed = window.confirm(
+        `Batch ${targetBatch} already exists in this timeslot.\n\n` +
+        `Existing session:\n${batchConflict.courseCode} - ${batchConflict.courseName}\n` +
+        `Staff: ${batchConflict.teacherName || '-'}\nRoom: ${batchConflict.roomNumber || '-'}\n\n` +
+        `Keep Batch ${targetBatch} for ${selected.courseCode}?\n` +
+        `${batchConflict.courseCode} will be changed to Batch ${replacementBatch}.`
+      );
+      if (!confirmed) return;
+    }
     setSaving(true);
     setNotice(null);
     try {
@@ -519,14 +535,19 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
         tutorialHours: draft.tutorialHours,
         coScheduleInfo: draft.coScheduleInfo,
         courseCodeDisplay: draft.courseCodeDisplay,
+        batchConflictSessionId: batchConflict?.id,
+        batchConflictRowVersion: batchConflict?.rowVersion,
         rowVersion: draft.rowVersion,
         updatedBy: draft.updatedBy || 'staff'
       });
       const movedPair = Boolean(result.pairedSessionId);
+      const swappedBatch = Boolean(result.batchSwappedSessionId);
       closeEditor();
       setNotice({
         type: 'success',
-        text: result.warnings?.length
+        text: swappedBatch
+          ? `Batch ${targetBatch} kept and the existing session changed to Batch ${replacementBatch}.`
+          : result.warnings?.length
           ? `Saved with ${result.warnings.length} warning(s).`
           : movedPair ? 'Paired 25 + 25 session moved successfully.' : 'Session updated successfully.'
       });
@@ -931,6 +952,7 @@ function ChangerApp({ authUser, onLogin, onLogout }) {
           onClose={closeEditor}
           onSave={saveDraft}
           onSwapRoom={swapSelectedRoom}
+          batchConflict={batchConflict}
           onSplit={openBalancedSplit}
           onDelete={deleteSelectedSession}
           days={meta?.days || []}
@@ -1192,7 +1214,7 @@ function ActivityPanel({ activity }) {
   );
 }
 
-function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onBatchChange, onClose, onSave, onSwapRoom, onSplit, onDelete, days }) {
+function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, onBatchChange, onClose, onSave, onSwapRoom, batchConflict, onSplit, onDelete, days }) {
   const selectedRoom = rooms.find((room) => String(room.id) === String(draft.roomId));
   const pairedSession = draft.pairedSession;
   const movesPair = Boolean(pairedSession) && (
@@ -1316,6 +1338,18 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
           {draft.scheduleType === 'lab' ? (
             <>
               <LabBatchPicker draft={draft} onChange={onBatchChange} />
+              {batchConflict && (
+                <div className="batch-conflict-panel" role="status">
+                  <AlertTriangle size={18} />
+                  <div>
+                    <strong>Batch {getBatchNumber(draft)} already exists in this timeslot</strong>
+                    <span>
+                      {batchConflict.courseCode} with {batchConflict.teacherName || 'Staff TBA'} in {batchConflict.roomNumber || 'an assigned room'}.
+                      Saving will ask to change it to Batch {getBatchNumber(draft) === 1 ? 2 : 1}.
+                    </span>
+                  </div>
+                </div>
+              )}
               <div className="form-grid">
                 <label>Batches<input type="number" min="1" value={draft.numBatches ?? ''} onChange={(event) => onChange('numBatches', toOptionalNumber(event.target.value))} /></label>
                 <label>Practical Hours<input type="number" min="0" step="0.5" value={draft.practicalHours ?? ''} onChange={(event) => onChange('practicalHours', toOptionalNumber(event.target.value))} /></label>
@@ -1340,7 +1374,7 @@ function EditModal({ selected, draft, slots, rooms, teachers, saving, onChange, 
           <button className="danger-action" onClick={onDelete} disabled={saving}><Trash2 size={17} /> Delete</button>
           <span className="modal-spacer" />
           <button className="secondary-action" onClick={onClose}>Cancel</button>
-          <button className="primary-action" onClick={onSave} disabled={saving}>{saving ? <Clock size={17} /> : <Save size={17} />} {saving ? 'Saving' : movesPair ? 'Move Paired Session' : 'Save Changes'}</button>
+          <button className="primary-action" onClick={onSave} disabled={saving}>{saving ? <Clock size={17} /> : batchConflict ? <ArrowLeftRight size={17} /> : <Save size={17} />} {saving ? 'Saving' : batchConflict ? 'Save & Swap Batches' : movesPair ? 'Move Paired Session' : 'Save Changes'}</button>
         </footer>
       </section>
     </div>
@@ -2127,6 +2161,38 @@ function getBatchMode(session) {
   if (number === 1 || label.includes('batch 1')) return 'batch1';
   if (number === 2 || label.includes('batch 2')) return 'batch2';
   return 'none';
+}
+
+function getBatchNumber(session) {
+  const mode = getBatchMode(session);
+  if (mode === 'batch1') return 1;
+  if (mode === 'batch2') return 2;
+  return null;
+}
+
+function findBatchConflictSession(sessions, selected, draft, slots) {
+  if (!selected || !draft || draft.scheduleType !== 'lab') return null;
+  const targetBatch = getBatchNumber(draft);
+  if (!targetBatch) return null;
+  const slot = slots.find((entry) => entry.slot_key === draft.slotKey);
+  if (!slot) return null;
+  const targetStart = Number(slot.start_minute);
+  const targetEnd = Number(slot.end_minute);
+
+  return sessions.find((candidate) => {
+    if (Number(candidate.id) === Number(draft.id) || Number(candidate.id) === Number(draft.pairedSessionId)) return false;
+    if (candidate.scheduleType !== 'lab' || getBatchNumber(candidate) !== targetBatch) return false;
+    if (candidate.day !== draft.day || !rangesOverlap(candidate.startMinute, candidate.endMinute, targetStart, targetEnd)) return false;
+    if (candidate.department !== selected.department || Number(candidate.semester) !== Number(selected.semester)) return false;
+    if (Number(selected.semester) === 3) {
+      return candidate.sectionIndex !== null && Number(candidate.sectionIndex) === Number(selected.sectionIndex);
+    }
+    return Boolean(selected.groupName) && candidate.groupName === selected.groupName;
+  }) || null;
+}
+
+function rangesOverlap(leftStart, leftEnd, rightStart, rightEnd) {
+  return Number(leftStart) < Number(rightEnd) && Number(rightStart) < Number(leftEnd);
 }
 
 function applyBatchMode(current, mode, emptyValue = null) {

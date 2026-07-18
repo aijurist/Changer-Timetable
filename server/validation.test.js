@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveStudentCount, findSessionConflicts } from './validation.js';
+import { compareLabBatches, effectiveStudentCount, findSessionConflicts, getLabBatchNumber } from './validation.js';
 
 function sectionSession(overrides = {}) {
   return {
@@ -101,4 +101,60 @@ test('allows the approved Semester 3 DBMS and OOPS staff overlap across differen
   const result = await findSessionConflicts(client, session, 1);
 
   assert.equal(result.conflicts.length, 0);
+});
+
+test('allows different lab batches to share a Semester 3 section timeslot', async () => {
+  const client = fakeClient({
+    section: [{
+      id: 50,
+      course_code: 'CS23332',
+      time_label: '8:00 - 9:40',
+      schedule_type: 'lab',
+      is_batched: true,
+      batch_number: 2
+    }]
+  });
+  const session = sectionSession({
+    schedule_type: 'lab',
+    is_batched: true,
+    batch_number: 1
+  });
+
+  const result = await findSessionConflicts(client, session, 1);
+
+  assert.equal(result.conflicts.length, 0);
+  assert.equal(result.warnings.length, 0);
+});
+
+test('reports a specific conflict when the same lab batch already occupies the section', async () => {
+  const client = fakeClient({
+    section: [{
+      id: 50,
+      course_code: 'CS23332',
+      time_label: '8:00 - 9:40',
+      schedule_type: 'lab',
+      is_batched: true,
+      batch_label: 'Batch 1'
+    }]
+  });
+  const session = sectionSession({
+    schedule_type: 'lab',
+    is_batched: true,
+    batch_info: 'Batch 1'
+  });
+
+  const result = await findSessionConflicts(client, session, 1);
+
+  assert.equal(result.conflicts.length, 1);
+  assert.equal(result.conflicts[0].type, 'batch_conflict');
+  assert.match(result.conflicts[0].message, /already has Batch 1/);
+});
+
+test('normalizes batch numbers from structured fields and labels', () => {
+  assert.equal(getLabBatchNumber({ scheduleType: 'lab', isBatched: true, batchNumber: 2 }), 2);
+  assert.equal(getLabBatchNumber({ schedule_type: 'lab', is_batched: true, batch_info: 'Batch 1' }), 1);
+  assert.equal(compareLabBatches(
+    { scheduleType: 'lab', isBatched: true, batchNumber: 1 },
+    { schedule_type: 'lab', is_batched: true, batch_number: 2 }
+  ), 'different');
 });

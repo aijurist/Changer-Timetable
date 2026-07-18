@@ -9,6 +9,7 @@ import {
   effectiveStudentCount,
   findDepartmentPolicy,
   findSessionConflicts,
+  getLabBatchNumber,
   lockResources,
   validateDepartmentDay
 } from './validation.js';
@@ -68,6 +69,8 @@ const sessionPatchSchema = z.object({
   coScheduleInfo: z.union([z.string().trim().max(300), z.null()]).optional(),
   courseCodeDisplay: z.union([z.string().trim().max(120), z.null()]).optional(),
   allowCapacityOverride: z.boolean().optional(),
+  batchConflictSessionId: z.coerce.number().int().positive().optional(),
+  batchConflictRowVersion: z.coerce.number().int().positive().optional(),
   rowVersion: z.coerce.number().int().positive().optional(),
   updatedBy: z.string().trim().max(120).optional()
 });
@@ -136,6 +139,25 @@ function idList(value) {
   const rawValues = Array.isArray(value) ? value : String(value || '').split(',');
   const ids = rawValues.map(Number).filter((id) => Number.isInteger(id) && id > 0);
   return ids.length ? [...new Set(ids)] : [0];
+}
+
+function rangesOverlap(leftStart, leftEnd, rightStart, rightEnd) {
+  return Number(leftStart) < Number(rightEnd) && Number(rightStart) < Number(leftEnd);
+}
+
+function sameLabCohort(left, right) {
+  if ((left?.schedule_type ?? left?.scheduleType) !== 'lab' || (right?.schedule_type ?? right?.scheduleType) !== 'lab') return false;
+  if (left?.department !== right?.department || Number(left?.semester) !== Number(right?.semester)) return false;
+
+  const leftSection = getSectionIndex(left);
+  const rightSection = getSectionIndex(right);
+  if (leftSection !== null || rightSection !== null) {
+    return leftSection !== null && leftSection === rightSection;
+  }
+
+  const leftGroup = left?.group_name ?? left?.groupName;
+  const rightGroup = right?.group_name ?? right?.groupName;
+  return Boolean(leftGroup) && leftGroup === rightGroup;
 }
 
 function dedupeValidationItems(items) {
@@ -911,7 +933,11 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
         `INSERT INTO edit_requests (session_id, requested_by, payload)
          VALUES ($1, $2, $3)
          RETURNING id`,
-        [sessionId, payload.updatedBy || null, payload]
+        [
+          sessionId,
+          payload.updatedBy || null,
+          payload.batchConflictSessionId ? { action: 'swap_batch', ...payload } : payload
+        ]
       );
       const requestId = request.rows[0].id;
 
@@ -932,18 +958,32 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
       }
       const lockedRows = await client.query(
         `SELECT * FROM sessions WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE`,
-        [[sessionId, pairLookup?.id].filter(Boolean)]
+        [[sessionId, pairLookup?.id, payload.batchConflictSessionId].filter(Boolean)]
       );
       const current = lockedRows.rows.find((row) => Number(row.id) === sessionId);
       const paired = pairLookup
         ? lockedRows.rows.find((row) => Number(row.id) === Number(pairLookup.id)) || null
         : null;
+      const batchConflictSession = payload.batchConflictSessionId
+        ? lockedRows.rows.find((row) => Number(row.id) === Number(payload.batchConflictSessionId)) || null
+        : null;
       if (!current) throw new HttpError(404, 'Session not found');
+      if (payload.batchConflictSessionId && !batchConflictSession) {
+        throw new HttpError(404, 'The conflicting batch session was not found.');
+      }
+      if (payload.batchConflictSessionId === sessionId) {
+        throw new HttpError(400, 'A session cannot swap its batch with itself.');
+      }
 
       if (payload.rowVersion && payload.rowVersion !== current.row_version) {
         const details = { currentVersion: current.row_version };
         await rejectEdit(client, requestId, 'stale_session', details);
         return { status: 409, body: { success: false, message: 'Session was updated by someone else. Refresh and try again.', details } };
+      }
+      if (batchConflictSession && (!payload.batchConflictRowVersion || payload.batchConflictRowVersion !== batchConflictSession.row_version)) {
+        const details = { currentVersion: batchConflictSession.row_version, sessionId: String(batchConflictSession.id) };
+        await rejectEdit(client, requestId, 'stale_batch_session', details);
+        return { status: 409, body: { success: false, message: 'The existing batch session changed. Refresh and try again.', details } };
       }
 
       const roomId = payload.roomId ?? current.room_id;
@@ -988,6 +1028,43 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
 
       nextSession.course_code_display = formatCourseCodeDisplay(nextSession.schedule_type, nextSession.course_code, nextSession);
 
+      let batchConflictNextSession = null;
+      if (batchConflictSession) {
+        const targetBatch = getLabBatchNumber(nextSession);
+        const occupiedBatch = getLabBatchNumber(batchConflictSession);
+        const isSameTargetTime = normalizeDay(batchConflictSession.day) === nextSession.day
+          && rangesOverlap(batchConflictSession.start_minute, batchConflictSession.end_minute, nextSession.start_minute, nextSession.end_minute);
+        if (targetBatch === null || occupiedBatch !== targetBatch || !sameLabCohort(nextSession, batchConflictSession) || !isSameTargetTime) {
+          const details = { sessionId: String(batchConflictSession.id), targetBatch, occupiedBatch };
+          await rejectEdit(client, requestId, 'invalid_batch_swap', details);
+          return {
+            status: 409,
+            body: {
+              success: false,
+              message: 'The selected session no longer occupies that batch and timeslot. Refresh and try again.',
+              details
+            }
+          };
+        }
+        const replacementBatch = targetBatch === 1 ? 2 : 1;
+        const replacementLabel = `Batch ${replacementBatch}`;
+        batchConflictNextSession = {
+          ...batchConflictSession,
+          is_batched: true,
+          batch_info: replacementLabel,
+          num_batches: batchConflictSession.num_batches || 2,
+          batch_number: replacementBatch,
+          batch_label: replacementLabel,
+          course_code_display: formatCourseCodeDisplay('lab', batchConflictSession.course_code, {
+            ...batchConflictSession,
+            is_batched: true,
+            batch_info: replacementLabel,
+            batch_number: replacementBatch,
+            batch_label: replacementLabel
+          })
+        };
+      }
+
       const movesPair = Boolean(paired) && (
         nextSession.day !== paired.day ||
         nextSession.slot_key !== paired.slot_key ||
@@ -1008,10 +1085,11 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
             allow_room_conflicts: nextSession.allow_room_conflicts
           }
         : null;
-      const movingIds = [sessionId, paired?.id].filter(Boolean);
+      const movingIds = [sessionId, paired?.id, batchConflictSession?.id].filter(Boolean);
       const resourceKeys = [
         ...buildResourceKeys(current, nextSession),
-        ...(pairedNextSession ? buildResourceKeys(paired, pairedNextSession) : [])
+        ...(pairedNextSession ? buildResourceKeys(paired, pairedNextSession) : []),
+        ...(batchConflictNextSession ? buildResourceKeys(batchConflictSession, batchConflictNextSession) : [])
       ];
       await lockResources(client, [...new Set(resourceKeys)].sort());
 
@@ -1022,6 +1100,10 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
         const pairedValidation = await findSessionConflicts(client, pairedNextSession, movingIds);
         validation.conflicts.push(...pairedValidation.conflicts);
         validation.warnings.push(...pairedValidation.warnings);
+      }
+      if (batchConflictNextSession) {
+        const batchSwapValidation = await findSessionConflicts(client, batchConflictNextSession, movingIds);
+        validation.conflicts.push(...batchSwapValidation.conflicts.filter((item) => item.type === 'batch_conflict'));
       }
       if (dayError) validation.conflicts.unshift(dayError);
       validation.conflicts = dedupeValidationItems(validation.conflicts);
@@ -1041,6 +1123,9 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
 
       const beforePayload = await serializeSession(client, sessionId);
       const pairedBeforePayload = movesPair ? await serializeSession(client, paired.id) : null;
+      const batchConflictBeforePayload = batchConflictSession
+        ? await serializeSession(client, batchConflictSession.id)
+        : null;
       const updated = await client.query(
         `UPDATE sessions
          SET day = $2,
@@ -1134,6 +1219,31 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
         );
       }
 
+      if (batchConflictNextSession) {
+        await client.query("SET LOCAL app.seed_mode = 'on'");
+        await client.query(
+          `UPDATE sessions
+           SET is_batched = true,
+               batch_info = $2,
+               num_batches = $3,
+               batch_number = $4,
+               batch_label = $5,
+               course_code_display = $6,
+               row_version = row_version + 1,
+               updated_by = $7
+           WHERE id = $1`,
+          [
+            batchConflictSession.id,
+            batchConflictNextSession.batch_info,
+            batchConflictNextSession.num_batches,
+            batchConflictNextSession.batch_number,
+            batchConflictNextSession.batch_label,
+            batchConflictNextSession.course_code_display,
+            payload.updatedBy || null
+          ]
+        );
+      }
+
       const afterPayload = await serializeSession(client, sessionId);
       await client.query(
         `INSERT INTO session_audit_log (session_id, edit_request_id, changed_by, before_payload, after_payload)
@@ -1148,11 +1258,23 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
           [paired.id, requestId, payload.updatedBy || null, pairedBeforePayload, pairedAfterPayload]
         );
       }
+      if (batchConflictSession) {
+        const batchConflictAfterPayload = await serializeSession(client, batchConflictSession.id);
+        await client.query(
+          `INSERT INTO session_audit_log (session_id, edit_request_id, changed_by, before_payload, after_payload)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [batchConflictSession.id, requestId, payload.updatedBy || null, batchConflictBeforePayload, batchConflictAfterPayload]
+        );
+      }
       await client.query(
         `UPDATE edit_requests
          SET status = 'applied', result = $2, completed_at = now()
          WHERE id = $1`,
-        [requestId, { warnings: validation.warnings, pairedSessionId: movesPair ? String(paired.id) : null }]
+        [requestId, {
+          warnings: validation.warnings,
+          pairedSessionId: movesPair ? String(paired.id) : null,
+          batchSwappedSessionId: batchConflictSession ? String(batchConflictSession.id) : null
+        }]
       );
 
       const row = await client.query(`${sessionSelectSql()} WHERE s.id = $1`, [updated.rows[0].id]);
@@ -1162,6 +1284,7 @@ app.patch('/api/sessions/:id', adminOnly, async (req, res, next) => {
           success: true,
           session: mapSessionRow(row.rows[0]),
           pairedSessionId: movesPair ? String(paired.id) : null,
+          batchSwappedSessionId: batchConflictSession ? String(batchConflictSession.id) : null,
           warnings: validation.warnings,
           editRequestId: requestId
         }
