@@ -29,6 +29,7 @@ import {
   X
 } from 'lucide-react';
 import { api } from './api.js';
+import { getScheduleDisplayDays } from './scheduleDays.js';
 import { filtersForVisibleSession } from './sessionVisibility.js';
 import { useChangerStore } from './store.js';
 import './styles.css';
@@ -2553,18 +2554,6 @@ function getAllowedSlots(meta, scheduleType) {
   return scheduleType === 'lab' ? meta?.labSessions || [] : meta?.theorySlots || [];
 }
 
-function getScheduleDisplayDays(rows, allDays) {
-  const orderedDays = allDays?.length ? allDays : ['monday', 'tuesday', 'wed', 'thur', 'fri', 'saturday'];
-  const patternDays = rows.map((session) => parseDayPattern(session.dayPattern, orderedDays)).find((days) => days.length === 5);
-  if (patternDays) return patternDays;
-
-  const daysInData = new Set(rows.map((session) => normalizeDayKey(session.day)).filter(Boolean));
-  if (orderedDays.length <= 5) return orderedDays;
-  if (daysInData.has('monday') && !daysInData.has('saturday')) return orderedDays.filter((day) => day !== 'saturday').slice(0, 5);
-  if (daysInData.has('saturday') && !daysInData.has('monday')) return orderedDays.filter((day) => day !== 'monday').slice(0, 5);
-  return orderedDays.filter((day) => day !== 'saturday').slice(0, 5);
-}
-
 function normalizeDayKey(day) {
   const aliases = {
     mon: 'monday',
@@ -2584,32 +2573,6 @@ function normalizeDayKey(day) {
     saturday: 'saturday'
   };
   return aliases[String(day || '').trim().toLowerCase()] || day;
-}
-
-function parseDayPattern(pattern, orderedDays) {
-  const normalized = String(pattern || '').toLowerCase().replace(/\s+/g, '');
-  const dayAliases = {
-    monday: 'monday',
-    mon: 'monday',
-    tuesday: 'tuesday',
-    tue: 'tuesday',
-    wednesday: 'wed',
-    wed: 'wed',
-    thursday: 'thur',
-    thur: 'thur',
-    friday: 'fri',
-    fri: 'fri',
-    saturday: 'saturday',
-    sat: 'saturday'
-  };
-  const rangeMatch = normalized.match(/(monday|mon|tuesday|tue|wednesday|wed|thursday|thur|friday|fri|saturday|sat)-(monday|mon|tuesday|tue|wednesday|wed|thursday|thur|friday|fri|saturday|sat)/);
-  if (!rangeMatch) return [];
-  const start = dayAliases[rangeMatch[1]];
-  const end = dayAliases[rangeMatch[2]];
-  const startIndex = orderedDays.indexOf(start);
-  const endIndex = orderedDays.indexOf(end);
-  if (startIndex === -1 || endIndex === -1 || endIndex < startIndex) return [];
-  return orderedDays.slice(startIndex, endIndex + 1);
 }
 
 function findPolicy(meta, department) {
