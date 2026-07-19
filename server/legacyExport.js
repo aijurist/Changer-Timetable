@@ -29,7 +29,9 @@ export const labCsvHeaders = [
   'co_schedule_id',
   'co_schedule_group_size',
   'co_schedule_partner_teachers',
-  'co_schedule_info'
+  'co_schedule_info',
+  'batch_number',
+  'batch_label'
 ];
 
 export const theoryCsvHeaders = [
@@ -63,8 +65,6 @@ export const theoryCsvHeaders = [
 
 export const secondYearLabCsvHeaders = [
   ...labCsvHeaders,
-  'batch_number',
-  'batch_label',
   'capacity_info'
 ];
 
@@ -110,6 +110,7 @@ export function toLegacySession(row) {
   };
 
   if (row.schedule_type === 'lab') {
+    const batchNumber = exportBatchNumber(row);
     return {
       ...base,
       session_name: row.session_name,
@@ -120,8 +121,8 @@ export function toLegacySession(row) {
       is_batched: Boolean(row.is_batched),
       batch_info: row.batch_info,
       num_batches: row.num_batches,
-      batch_number: row.batch_number,
-      batch_label: row.batch_label,
+      batch_number: batchNumber,
+      batch_label: exportBatchLabel(row, batchNumber),
       co_schedule_id: row.co_schedule_id,
       co_schedule_group_size: row.co_schedule_group_size,
       co_schedule_partner_teachers: row.co_schedule_partner_teachers,
@@ -142,6 +143,24 @@ export function toLegacySession(row) {
     bundle_half: row.bundle_half ?? rawPayload.bundle_half ?? null,
     section_id: row.section_id ?? rawPayload.section_id ?? row.section_index ?? null
   };
+}
+
+function exportBatchNumber(row) {
+  if (!row.is_batched) return null;
+  const explicit = Number(row.batch_number);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+
+  for (const value of [row.batch_label, row.batch_info, row.course_code_display]) {
+    const match = String(value || '').match(/\bbatch\s*[-_:]?\s*(\d+)\b/i);
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
+function exportBatchLabel(row, batchNumber) {
+  if (!row.is_batched) return null;
+  const explicit = String(row.batch_label || '').trim();
+  return explicit || (batchNumber ? `Batch ${batchNumber}` : null);
 }
 
 export function toCsv(rows, headers) {

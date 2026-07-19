@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { parse } from 'csv-parse/sync';
 import {
   csvHeadersFor,
+  labCsvHeaders,
   secondYearLabCsvHeaders,
   secondYearTheoryCsvHeaders,
   toCsv,
@@ -33,6 +34,8 @@ test('uses the exact second-year theory and lab CSV headers for Semester 3', () 
   assert.equal(csvHeadersFor('theory', 3), secondYearTheoryCsvHeaders);
   assert.equal(csvHeadersFor('lab', '3'), secondYearLabCsvHeaders);
   assert.notEqual(csvHeadersFor('theory', 5), secondYearTheoryCsvHeaders);
+  assert.deepEqual(csvHeadersFor('lab', 5), labCsvHeaders);
+  assert.deepEqual(labCsvHeaders.slice(-2), ['batch_number', 'batch_label']);
 });
 
 test('exports Semester 3 theory with source keys, bundle fields, and CSV booleans', () => {
@@ -121,4 +124,24 @@ test('exports Semester 3 lab batch fields in the reference order', () => {
   assert.equal(row.batch_number, '2');
   assert.equal(row.batch_label, 'Batch 2');
   assert.equal(row.capacity_info, '64/35');
+});
+
+test('exports structured batch fields for older lab rows that only have batch_info', () => {
+  const mapped = toLegacySession({
+    schedule_type: 'lab',
+    day: 'tuesday',
+    session_name: 'L1',
+    time_label: '8:00 - 9:40',
+    course_code: 'CB23532',
+    course_name: 'Legacy batched lab',
+    is_batched: true,
+    batch_info: 'Batch 2',
+    num_batches: 2,
+    semester: 5
+  });
+
+  const [row] = parse(toCsv([mapped], csvHeadersFor('lab', 5)), { columns: true, skip_empty_lines: true });
+  assert.equal(row.batch_info, 'Batch 2');
+  assert.equal(row.batch_number, '2');
+  assert.equal(row.batch_label, 'Batch 2');
 });
